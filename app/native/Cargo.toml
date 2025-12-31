@@ -13,3 +13,4 @@ socks5-impl = "0.4" # To handle the SOCKS5 handshake
 rust-ini = "0.21.3"
 boringtun = "0.6.0"
 base64 = "0.22.1"
+etherparse = "0.19.0"
