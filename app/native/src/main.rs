@@ -1,6 +1,6 @@
 use ini::Ini;
 use std::net::UdpSocket;
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 
 pub mod test;
 pub mod helper;

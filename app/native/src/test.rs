@@ -1,24 +1,21 @@
-use base64::{engine::general_purpose, Engine as _};
+use crate::helper::*;
 use boringtun::noise::{Tunn, TunnResult};
-use boringtun::x25519::{PublicKey, StaticSecret};
-use etherparse::PacketBuilder;
+use etherparse::{Icmpv4Header, Ipv4HeaderSlice};
 use std::net::{SocketAddr, UdpSocket};
-use std::time::{Duration, Instant};
-use crate::helper::{*};
+use std::time::Duration;
 
 // --- CONFIGURATION (Replace these with your ProtonVPN details) ---
-const PRIVATE_KEY_B64: &str = "+KTV+51/QizYMlhszn1aKW7ps79TX9FDKQb2Po9v+WI="; // e.g. "WOx+..."
-const SERVER_PUBKEY_B64: &str = "KMsTNyOCInIzQ7cAFYUMyDDPhQXsTEb2T9o8gw1Hbww="; // e.g. "ABC+..."
-const ENDPOINT_ADDR: &str = "89.222.98.40:51820"; // VPN Server IP:Port
 const MY_VPN_IP: [u8; 4] = [10, 2, 0, 2]; // Your interface Address (e.g. 10.2.0.2)
 const TARGET_IP: [u8; 4] = [8, 8, 8, 8]; // Google DNS
 
-pub fn google_ping_test(tunn : &mut Tunn, udp_socket : UdpSocket, endpoint: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
-
+pub fn google_ping_test(
+    tunn: &mut Tunn,
+    udp_socket: UdpSocket,
+    endpoint: SocketAddr,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Starting Pure User-Space WireGuard Ping ---");
     println!("Endpoint: {}", endpoint);
     println!("Target:   {:?}", TARGET_IP);
-
 
     // 4. Construct the Raw ICMP Packet (Ping)
     let ping_packet = create_icmp_packet(MY_VPN_IP, TARGET_IP);
@@ -97,7 +94,7 @@ pub fn google_ping_test(tunn : &mut Tunn, udp_socket : UdpSocket, endpoint: Sock
                         );
                     }
                     TunnResult::Err(e) => eprintln!("Tunnel Error: {:?}", e),
-                    _ => {}
+                    //_ => {}
                 }
             }
             Err(_) => {
@@ -110,4 +107,19 @@ pub fn google_ping_test(tunn : &mut Tunn, udp_socket : UdpSocket, endpoint: Sock
     Ok(())
 }
 
-
+// Helper: Print the result to prove it's a PONG
+pub fn parse_and_print_icmp(packet: &[u8]) -> bool {
+    // Skip IPv4 Header (usually 20 bytes) to get to ICMP
+    if let Ok(ip_header) = Ipv4HeaderSlice::from_slice(packet) {
+        let icmp_offset = ip_header.slice().len();
+        if let Ok((icmp_header, _body)) = Icmpv4Header::from_slice(&packet[icmp_offset..]) {
+            println!("   Type: {:?}", icmp_header.icmp_type); // Should be EchoReply (0)
+            println!("   Source IP: {:?}", ip_header.source_addr());
+            if matches!(icmp_header.icmp_type, etherparse::Icmpv4Type::EchoReply(_)) {
+                println!("🎉 SUCCESS: Google replied!");
+                return true;
+            }
+        }
+    }
+    return false;
+}

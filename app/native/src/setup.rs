@@ -1,16 +1,12 @@
 use anyhow::Result;
+use base64::{engine::general_purpose, Engine as _};
 use boringtun::noise::Tunn;
-use boringtun::x25519::{PublicKey, StaticSecret, EphemeralSecret};
+use boringtun::x25519::{PublicKey, StaticSecret};
 use ini::Ini;
-use smoltcp::iface::{Config, Interface, SocketSet};
+use smoltcp::iface::{Config, Interface};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
-use base64::{Engine as _, engine::general_purpose};
-use std::net::{SocketAddr, UdpSocket};
-use std::any;
-use tokio::signal;
-
+use smoltcp::wire::{HardwareAddress, IpCidr};
 struct MyVirtualDevice {
     rx_queue: Vec<Vec<u8>>,
     tx_queue: Vec<Vec<u8>>,
@@ -95,7 +91,6 @@ pub fn setup_smoltcp_iface(conf: Ini) -> Result<Interface, anyhow::Error> {
 }
 
 pub fn setup_tunnel(conf: Ini) -> Result<Tunn, &'static str> {
-    
     let private_b64 = conf.get_from(Some("Interface"), "PrivateKey").unwrap();
     let public_b64 = conf.get_from(Some("Peer"), "PublicKey").unwrap();
 
