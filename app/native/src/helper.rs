@@ -22,10 +22,3 @@ pub fn create_icmp_packet(src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
     builder.write(&mut result, payload).unwrap();
     result
 }
-
-pub fn get_endpoint(conf: Ini) -> SocketAddr {
-    conf.get_from(Some("Peer"), "Endpoint")
-        .unwrap()
-        .parse()
-        .unwrap()
-}

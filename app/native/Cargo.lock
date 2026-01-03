@@ -489,6 +489,7 @@ dependencies = [
  "base64 0.22.1",
  "boringtun",
  "etherparse",
+ "managed",
  "rust-ini",
  "smoltcp",
  "socks5-impl",

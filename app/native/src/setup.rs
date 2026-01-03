@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
 use boringtun::noise::Tunn;
@@ -7,9 +8,9 @@ use smoltcp::iface::{Config, Interface};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpCidr};
-struct MyVirtualDevice {
-    rx_queue: Vec<Vec<u8>>,
-    tx_queue: Vec<Vec<u8>>,
+pub struct MyVirtualDevice {
+    pub rx_queue: VecDeque<Vec<u8>>,
+    pub tx_queue: VecDeque<Vec<u8>>,
 }
 
 impl Device for MyVirtualDevice {
@@ -27,7 +28,7 @@ impl Device for MyVirtualDevice {
         if self.rx_queue.is_empty() {
             return None;
         }
-        let buffer: Vec<u8> = self.rx_queue.remove(0);
+        let buffer: Vec<u8> = self.rx_queue.pop_front().unwrap();
         Some((RxToken(buffer), TxToken(self)))
     }
 
@@ -44,7 +45,7 @@ impl Device for MyVirtualDevice {
 }
 
 // Tokens required by smoltcp to manage buffers
-struct RxToken(Vec<u8>);
+pub struct RxToken(Vec<u8>);
 impl smoltcp::phy::RxToken for RxToken {
     fn consume<R, F>(mut self, f: F) -> R
     where
@@ -54,7 +55,7 @@ impl smoltcp::phy::RxToken for RxToken {
     }
 }
 
-struct TxToken<'a>(&'a mut MyVirtualDevice);
+pub struct TxToken<'a>(&'a mut MyVirtualDevice);
 impl<'a> smoltcp::phy::TxToken for TxToken<'a> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
@@ -62,17 +63,17 @@ impl<'a> smoltcp::phy::TxToken for TxToken<'a> {
     {
         let mut buffer: Vec<u8> = vec![0u8; len];
         let result: R = f(&mut buffer);
-        self.0.tx_queue.push(buffer);
+        self.0.tx_queue.push_back(buffer);
         result
     }
 }
 
-pub fn setup_smoltcp_iface(conf: Ini) -> Result<Interface, anyhow::Error> {
+pub fn setup_smoltcp_iface(conf: Ini) -> Result<(Interface, MyVirtualDevice), anyhow::Error> {
     let config = Config::new(HardwareAddress::Ip);
 
     let mut device = MyVirtualDevice {
-        rx_queue: Vec::new(),
-        tx_queue: Vec::new(),
+        rx_queue: VecDeque::new(),
+        tx_queue: VecDeque::new(),
     };
 
     let vpn_ip: IpCidr = conf
@@ -87,7 +88,7 @@ pub fn setup_smoltcp_iface(conf: Ini) -> Result<Interface, anyhow::Error> {
         addrs.push(vpn_ip).unwrap();
     });
 
-    Ok(iface)
+    Ok((iface, device))
 }
 
 pub fn setup_tunnel(conf: Ini) -> Result<Tunn, &'static str> {
