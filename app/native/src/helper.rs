@@ -1,7 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
 use etherparse::PacketBuilder;
-use ini::Ini;
-use std::net::SocketAddr;
 
 // Helper: Decode Base64 WireGuard keys to 32-byte arrays
 pub fn decode_key(b64: &str) -> Result<[u8; 32], String> {

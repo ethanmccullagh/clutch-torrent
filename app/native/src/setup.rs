@@ -1,73 +1,46 @@
-use std::collections::VecDeque;
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
 use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
 use ini::Ini;
-use smoltcp::iface::{Config, Interface};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium};
-use smoltcp::time::Instant;
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::wire::{HardwareAddress, IpCidr};
-pub struct MyVirtualDevice {
-    pub rx_queue: VecDeque<Vec<u8>>,
-    pub tx_queue: VecDeque<Vec<u8>>,
+use std::collections::VecDeque;
+use tokio::net::UdpSocket;
+use core::net::SocketAddr;
+use std::collections::HashMap;
+
+use crate::schema::*;
+
+pub async fn setup_engine(conf: Ini) -> VpnEngine{
+    let mut tunnel = setup_tunnel(conf.clone()).unwrap();
+
+    let (mut iface, mut device) = setup_smoltcp_iface(conf.clone()).unwrap();
+
+    let sockets = SocketSet::new(vec![]); 
+
+    let udp_socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+
+    let connection_map = HashMap::<usize, SocketHandle>::new();
+
+    let endpoint: SocketAddr = conf
+        .get_from(Some("Peer"), "Endpoint")
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    VpnEngine {
+        tunn : tunnel,
+        iface : iface,
+        sockets : sockets,
+        device: device,
+        connection_map : connection_map,
+        udp_socket: udp_socket,
+        endpoint: endpoint
+    }
+
+
 }
-
-impl Device for MyVirtualDevice {
-    type RxToken<'a>
-        = RxToken
-    where
-        Self: 'a;
-
-    type TxToken<'a>
-        = TxToken<'a>
-    where
-        Self: 'a;
-
-    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if self.rx_queue.is_empty() {
-            return None;
-        }
-        let buffer: Vec<u8> = self.rx_queue.pop_front().unwrap();
-        Some((RxToken(buffer), TxToken(self)))
-    }
-
-    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        Some(TxToken(self))
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut caps: DeviceCapabilities = DeviceCapabilities::default();
-        caps.max_transmission_unit = 1500;
-        caps.medium = Medium::Ip; // We work at the IP layer, not Ethernet
-        caps
-    }
-}
-
-// Tokens required by smoltcp to manage buffers
-pub struct RxToken(Vec<u8>);
-impl smoltcp::phy::RxToken for RxToken {
-    fn consume<R, F>(mut self, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        f(&mut self.0)
-    }
-}
-
-pub struct TxToken<'a>(&'a mut MyVirtualDevice);
-impl<'a> smoltcp::phy::TxToken for TxToken<'a> {
-    fn consume<R, F>(self, len: usize, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        let mut buffer: Vec<u8> = vec![0u8; len];
-        let result: R = f(&mut buffer);
-        self.0.tx_queue.push_back(buffer);
-        result
-    }
-}
-
 pub fn setup_smoltcp_iface(conf: Ini) -> Result<(Interface, MyVirtualDevice), anyhow::Error> {
     let config = Config::new(HardwareAddress::Ip);
 
