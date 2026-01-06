@@ -4,12 +4,11 @@ use smoltcp::phy::{Device, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::future::Future;
+use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-
 pub enum ProxyMessage {
     Connect {
         addr: [u8; 4],
@@ -22,18 +21,24 @@ pub enum ProxyMessage {
     Close,
 }
 
+pub struct ChannelMessage {
+    pub data: Vec<u8>,
+    pub addr: SocketAddr,
+}
+
 pub struct VpnEngine {
     pub iface: Interface,
     pub sockets: SocketSet<'static>,
     pub device: MyVirtualDevice,
     pub tunn: Tunn,
     pub connection_map: HashMap<usize, SocketHandle>,
-    pub udp_socket: UdpSocket,
     pub endpoint: SocketAddr,
+    pub udp_send_channel: mpsc::Sender<ChannelMessage>,
+    pub udp_recv_channel: mpsc::Receiver<ChannelMessage>,
 }
 
 impl VpnEngine {
-    pub fn encapsulate<'a>(
+    pub async fn encapsulate<'a>(
         &mut self,
         ip_packet: &Vec<u8>,
         scratch_buf: &'a mut [u8; 4096],
@@ -41,7 +46,7 @@ impl VpnEngine {
         self.tunn.encapsulate(ip_packet, scratch_buf)
     }
 
-    pub fn decapsulate<'a>(
+    pub async fn decapsulate<'a>(
         &mut self,
         packet: &[u8],
         scratch_buf: &'a mut [u8; 4096],
@@ -55,32 +60,54 @@ impl VpnEngine {
         self.iface.poll(now, &mut self.device, &mut self.sockets);
     }
 
-    pub fn tx_push_back(&mut self, ip_packet: Vec<u8>) {
+    pub fn poll_delay(&mut self, now: Instant) -> Option<smoltcp::time::Duration> {
+        self.iface.poll_delay(now, &self.sockets)
+    }
+
+    pub async fn tx_push_back(&mut self, ip_packet: Vec<u8>) {
         self.device.tx_queue.push_back(ip_packet);
     }
 
-    pub fn rx_push_back(&mut self, ip_packet: Vec<u8>) {
+    pub async fn rx_push_back(&mut self, ip_packet: Vec<u8>) {
         self.device.rx_queue.push_back(ip_packet);
     }
 
-    pub fn tx_pop_front(&mut self) -> Option<Vec<u8>> {
+    pub async fn tx_pop_front(&mut self) -> Option<Vec<u8>> {
         self.device.tx_queue.pop_front()
     }
 
-    pub fn rx_pop_front(&mut self) -> Option<Vec<u8>> {
+    pub async fn rx_pop_front(&mut self) -> Option<Vec<u8>> {
         self.device.rx_queue.pop_front()
     }
 
-    pub async fn udp_send(&mut self, encrypted_bytes: &mut [u8]) -> Result<usize, io::Error> {
-        self.udp_socket
-            .send_to(encrypted_bytes, self.endpoint)
+    pub async fn udp_send(
+        &mut self,
+        encrypted_bytes: &mut [u8],
+    ) -> Result<(), mpsc::error::SendError<ChannelMessage>> {
+        match self
+            .udp_send_channel
+            .send(ChannelMessage {
+                data: (encrypted_bytes.try_into().unwrap()),
+                addr: (self.endpoint),
+            })
             .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
     pub async fn udp_recv(
         &mut self,
-        recv_buf: &mut [u8; 4096],
-    ) -> Result<(usize, SocketAddr), io::Error> {
-        self.udp_socket.recv_from(recv_buf).await
+        recv_buf: &mut [u8;4096],
+    ) -> Result<(usize,SocketAddr), mpsc::error::TryRecvError> {
+        match self.udp_recv_channel.try_recv() {
+            Ok(msg) => {
+                let len = msg.data.len().min(4096);
+                recv_buf[..len].copy_from_slice(&msg.data[..len]);
+                Ok((len, msg.addr))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 

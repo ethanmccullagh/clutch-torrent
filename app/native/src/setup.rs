@@ -5,6 +5,7 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 use ini::Ini;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::wire::{HardwareAddress, IpCidr};
+use tokio::sync::mpsc;
 use std::collections::VecDeque;
 use tokio::net::UdpSocket;
 use core::net::SocketAddr;
@@ -12,14 +13,12 @@ use std::collections::HashMap;
 
 use crate::schema::*;
 
-pub async fn setup_engine(conf: Ini) -> VpnEngine{
+pub async fn setup_engine(conf: Ini, udp_send_channel : mpsc::Sender<ChannelMessage>, udp_recv_channel: mpsc::Receiver<ChannelMessage>) -> VpnEngine{
     let mut tunnel = setup_tunnel(conf.clone()).unwrap();
 
     let (mut iface, mut device) = setup_smoltcp_iface(conf.clone()).unwrap();
 
     let sockets = SocketSet::new(vec![]); 
-
-    let udp_socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
 
     let connection_map = HashMap::<usize, SocketHandle>::new();
 
@@ -35,8 +34,9 @@ pub async fn setup_engine(conf: Ini) -> VpnEngine{
         sockets : sockets,
         device: device,
         connection_map : connection_map,
-        udp_socket: udp_socket,
-        endpoint: endpoint
+        endpoint: endpoint,
+        udp_send_channel: udp_send_channel,
+        udp_recv_channel: udp_recv_channel
     }
 
 
