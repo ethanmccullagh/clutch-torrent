@@ -2,23 +2,29 @@ use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
 use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
+use core::net::SocketAddr;
 use ini::Ini;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::wire::{HardwareAddress, IpCidr};
-use tokio::sync::mpsc;
-use std::collections::VecDeque;
-use tokio::net::UdpSocket;
-use core::net::SocketAddr;
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 use crate::schema::*;
 
-pub async fn setup_engine(conf: Ini, udp_send_channel : mpsc::Sender<ChannelMessage>, udp_recv_channel: mpsc::Receiver<ChannelMessage>) -> VpnEngine{
-    let mut tunnel = setup_tunnel(conf.clone()).unwrap();
+pub async fn setup_engine(
+    conf: Ini,
+    udp_send_channel: mpsc::Sender<ChannelMessage>,
+    udp_recv_channel: mpsc::Receiver<ChannelMessage>,
+) -> (VpnEngine <'static>, mpsc::Sender<ProxyMessage>){
+    let tunnel = setup_tunnel(conf.clone()).unwrap();
+    let (device_txqueue_s, device_txqueue_r) = mpsc::channel::<Vec<u8>>(100);
+    let (device_rxqueue_s, device_rxqueue_r) = mpsc::channel::<Vec<u8>>(100);
+    let (control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
 
-    let (mut iface, mut device) = setup_smoltcp_iface(conf.clone()).unwrap();
+    let (iface, device) =
+        setup_smoltcp_iface(conf.clone(), device_rxqueue_r, device_txqueue_s).unwrap();
 
-    let sockets = SocketSet::new(vec![]); 
+    let sockets = SocketSet::new(vec![]);
 
     let connection_map = HashMap::<usize, SocketHandle>::new();
 
@@ -28,25 +34,30 @@ pub async fn setup_engine(conf: Ini, udp_send_channel : mpsc::Sender<ChannelMess
         .parse()
         .unwrap();
 
-    VpnEngine {
-        tunn : tunnel,
-        iface : iface,
-        sockets : sockets,
+    (VpnEngine {
+        tunn: tunnel,
+        iface: iface,
+        sockets: sockets,
         device: device,
-        connection_map : connection_map,
+        connection_map: connection_map,
         endpoint: endpoint,
         udp_send_channel: udp_send_channel,
-        udp_recv_channel: udp_recv_channel
-    }
-
-
+        udp_recv_channel: udp_recv_channel,
+        device_rx_sender: device_rxqueue_s,
+        device_tx_receiver: device_txqueue_r,
+        control_receiver: control_receiver
+    }, control_sender)
 }
-pub fn setup_smoltcp_iface(conf: Ini) -> Result<(Interface, MyVirtualDevice), anyhow::Error> {
+pub fn setup_smoltcp_iface(
+    conf: Ini,
+    rx_queue: mpsc::Receiver<Vec<u8>>,
+    tx_queue: mpsc::Sender<Vec<u8>>,
+) -> Result<(Interface, MyVirtualDevice)> {
     let config = Config::new(HardwareAddress::Ip);
 
     let mut device = MyVirtualDevice {
-        rx_queue: VecDeque::new(),
-        tx_queue: VecDeque::new(),
+        rx_queue: rx_queue,
+        tx_queue: tx_queue,
     };
 
     let vpn_ip: IpCidr = conf

@@ -1,24 +1,26 @@
+use anyhow::Result;
 use boringtun::noise::{Tunn, TunnResult};
+use etherparse::err::ip;
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium};
+use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::error::Error;
-use std::io;
 use std::net::SocketAddr;
-use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+
+
 pub enum ProxyMessage {
     Connect {
         addr: [u8; 4],
         port: u16,
         resp: mpsc::Sender<bool>,
     },
-    Data {
-        data: Vec<u8>,
+    Close {
+        addr: [u8; 4],
+        port: u16,
+        resp: mpsc::Sender<bool>,
     },
-    Close,
 }
 
 pub struct ChannelMessage {
@@ -26,117 +28,53 @@ pub struct ChannelMessage {
     pub addr: SocketAddr,
 }
 
-pub struct VpnEngine {
+pub struct VpnEngine<'a> {
     pub iface: Interface,
-    pub sockets: SocketSet<'static>,
+    pub sockets: SocketSet<'a>,
     pub device: MyVirtualDevice,
     pub tunn: Tunn,
     pub connection_map: HashMap<usize, SocketHandle>,
     pub endpoint: SocketAddr,
     pub udp_send_channel: mpsc::Sender<ChannelMessage>,
     pub udp_recv_channel: mpsc::Receiver<ChannelMessage>,
+    pub device_rx_sender: mpsc::Sender<Vec<u8>>,
+    pub device_tx_receiver: mpsc::Receiver<Vec<u8>>,
+    pub control_receiver: mpsc::Receiver<ProxyMessage>
 }
 
-impl VpnEngine {
-    pub async fn encapsulate<'a>(
-        &mut self,
-        ip_packet: &Vec<u8>,
-        scratch_buf: &'a mut [u8; 4096],
-    ) -> TunnResult<'a> {
-        self.tunn.encapsulate(ip_packet, scratch_buf)
-    }
-
-    pub async fn decapsulate<'a>(
-        &mut self,
-        packet: &[u8],
-        scratch_buf: &'a mut [u8; 4096],
-    ) -> TunnResult<'a> {
-        self.tunn.decapsulate(None, packet, scratch_buf)
-    }
-
-    pub async fn process_packets(&mut self) {
-        let now = Instant::now();
-        // Here we pass references to the internal fields mutably
-        self.iface.poll(now, &mut self.device, &mut self.sockets);
-    }
-
-    pub fn poll_delay(&mut self, now: Instant) -> Option<smoltcp::time::Duration> {
-        self.iface.poll_delay(now, &self.sockets)
-    }
-
-    pub async fn tx_push_back(&mut self, ip_packet: Vec<u8>) {
-        self.device.tx_queue.push_back(ip_packet);
-    }
-
-    pub async fn rx_push_back(&mut self, ip_packet: Vec<u8>) {
-        self.device.rx_queue.push_back(ip_packet);
-    }
-
-    pub async fn tx_pop_front(&mut self) -> Option<Vec<u8>> {
-        self.device.tx_queue.pop_front()
-    }
-
-    pub async fn rx_pop_front(&mut self) -> Option<Vec<u8>> {
-        self.device.rx_queue.pop_front()
-    }
-
-    pub async fn udp_send(
-        &mut self,
-        encrypted_bytes: &mut [u8],
-    ) -> Result<(), mpsc::error::SendError<ChannelMessage>> {
-        match self
-            .udp_send_channel
-            .send(ChannelMessage {
-                data: (encrypted_bytes.try_into().unwrap()),
-                addr: (self.endpoint),
-            })
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(e) => Err(e),
-        }
-    }
-    pub async fn udp_recv(
-        &mut self,
-        recv_buf: &mut [u8;4096],
-    ) -> Result<(usize,SocketAddr), mpsc::error::TryRecvError> {
-        match self.udp_recv_channel.try_recv() {
-            Ok(msg) => {
-                let len = msg.data.len().min(4096);
-                recv_buf[..len].copy_from_slice(&msg.data[..len]);
-                Ok((len, msg.addr))
-            }
-            Err(e) => Err(e),
-        }
-    }
-}
 
 pub struct MyVirtualDevice {
-    pub rx_queue: VecDeque<Vec<u8>>,
-    pub tx_queue: VecDeque<Vec<u8>>,
+    pub rx_queue: mpsc::Receiver<Vec<u8>>,
+    pub tx_queue: mpsc::Sender<Vec<u8>>,
 }
 
 impl Device for MyVirtualDevice {
     type RxToken<'a>
-        = RxToken
+        = ChannelRxToken
     where
         Self: 'a;
 
     type TxToken<'a>
-        = TxToken<'a>
+        = ChannelTxToken<'a>
     where
         Self: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if self.rx_queue.is_empty() {
-            return None;
+        match self.rx_queue.try_recv() {
+            Ok(buffer) => Some((
+                ChannelRxToken { buffer },
+                ChannelTxToken {
+                    tx_queue: &self.tx_queue,
+                },
+            )),
+            Err(_) => None,
         }
-        let buffer: Vec<u8> = self.rx_queue.pop_front().unwrap();
-        Some((RxToken(buffer), TxToken(self)))
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        Some(TxToken(self))
+        Some(ChannelTxToken {
+            tx_queue: &self.tx_queue,
+        })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -148,25 +86,32 @@ impl Device for MyVirtualDevice {
 }
 
 // Tokens required by smoltcp to manage buffers
-pub struct RxToken(Vec<u8>);
-impl smoltcp::phy::RxToken for RxToken {
+pub struct ChannelRxToken {
+    buffer: Vec<u8>,
+}
+
+impl RxToken for ChannelRxToken {
     fn consume<R, F>(mut self, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        f(&mut self.0)
+        f(&mut self.buffer)
     }
 }
 
-pub struct TxToken<'a>(&'a mut MyVirtualDevice);
-impl<'a> smoltcp::phy::TxToken for TxToken<'a> {
+pub struct ChannelTxToken<'a> {
+    tx_queue: &'a mpsc::Sender<Vec<u8>>,
+}
+impl<'a> TxToken for ChannelTxToken<'a> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
         let mut buffer: Vec<u8> = vec![0u8; len];
         let result: R = f(&mut buffer);
-        self.0.tx_queue.push_back(buffer);
+        if let Err(e) = self.tx_queue.try_send(buffer) {
+            eprintln!("TX CHANNEL FULL {}", e);
+        }
         result
     }
 }
