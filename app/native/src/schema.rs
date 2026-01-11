@@ -1,25 +1,22 @@
-use anyhow::Result;
-use boringtun::noise::{Tunn, TunnResult};
-use etherparse::err::ip;
+use boringtun::noise::{Tunn};
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use etherparse::{Ipv4Header, TcpHeader};
 
 
 pub enum ProxyMessage {
     Connect {
         addr: [u8; 4],
         port: u16,
-        resp: mpsc::Sender<bool>,
+        resp: oneshot::Sender<Option<SocketHandle>>,
     },
     Close {
-        addr: [u8; 4],
-        port: u16,
-        resp: mpsc::Sender<bool>,
+        handle : SocketHandle,
+        resp: oneshot::Sender<bool>,
     },
 }
 
@@ -30,16 +27,16 @@ pub struct ChannelMessage {
 
 pub struct VpnEngine<'a> {
     pub iface: Interface,
-    pub sockets: SocketSet<'a>,
+    pub vpn_sockets: SocketSet<'a>,
+    pub socks5_sockets: SocketSet<'a>,
     pub device: MyVirtualDevice,
-    pub tunn: Tunn,
-    pub connection_map: HashMap<usize, SocketHandle>,
     pub endpoint: SocketAddr,
-    pub udp_send_channel: mpsc::Sender<ChannelMessage>,
-    pub udp_recv_channel: mpsc::Receiver<ChannelMessage>,
+    pub boring_send_channel: mpsc::Sender<Vec<u8>>,
+    pub boring_recv_channel: mpsc::Receiver<Vec<u8>>,
     pub device_rx_sender: mpsc::Sender<Vec<u8>>,
     pub device_tx_receiver: mpsc::Receiver<Vec<u8>>,
-    pub control_receiver: mpsc::Receiver<ProxyMessage>
+    pub control_receiver: mpsc::Receiver<ProxyMessage>,
+    pub connection_map: HashMap<u64, (SocketHandle, mpsc::Sender<Vec<u8>>)>
 }
 
 
@@ -109,8 +106,14 @@ impl<'a> TxToken for ChannelTxToken<'a> {
     {
         let mut buffer: Vec<u8> = vec![0u8; len];
         let result: R = f(&mut buffer);
+
+        let (ip_header, packet) = Ipv4Header::from_slice(buffer.as_slice()).unwrap();
+        println!("ENGINE TRY SEND IP {:?}", ip_header);
+
+        let (tcp, _tcp_data) = TcpHeader::from_slice(packet).unwrap();
+        println!("ENGINE TCP {:?}", tcp);
         if let Err(e) = self.tx_queue.try_send(buffer) {
-            eprintln!("TX CHANNEL FULL {}", e);
+            eprintln!("ENGINE TX CHANNEL FULL {}", e);
         }
         result
     }
