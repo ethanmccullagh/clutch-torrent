@@ -21,14 +21,12 @@ async fn main() {
     //load config file from path
     let conf = Ini::load_from_file("/home/ethanm/Downloads/cachy-CA-1149.conf").unwrap();
 
-    let (tunn, endpoint) = setup_tunnel(conf.clone());
+    let (mut engine, control_sender, vpn_receiver, local_receiver, device_sender) = setup_engine(conf.clone());
 
-    let (udp_transmit_s, udp_recv_r, _task_handles) = spawn_boring_threads(tunn, endpoint).await.unwrap();
+    let (tunn, endpoint) = setup_tunnel(conf);
+    let _task_handles = spawn_boring_threads(tunn, endpoint, vpn_receiver, device_sender).await.unwrap();
 
-    let (mut engine, control_sender) = setup_engine(conf, udp_transmit_s, udp_recv_r).await;
 
-
-    //TEST: ping google using smoltcp interface
     ping_test(&mut engine);
 
     //let _joinhandle = tokio::spawn(connection_test(control_sender));

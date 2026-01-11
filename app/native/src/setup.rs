@@ -5,59 +5,47 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 use core::net::SocketAddr;
 use ini::Ini;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::wire::{HardwareAddress, IpCidr};
+use smoltcp::wire::{HardwareAddress, IpCidr, Ipv4Address};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use crate::schema::*;
 
-pub async fn setup_engine(
-    conf: Ini,
-    udp_send_channel: mpsc::Sender<Vec<u8>>,
-    udp_recv_channel: mpsc::Receiver<Vec<u8>>,
-) -> (VpnEngine <'static>, mpsc::Sender<ProxyMessage>){
-    let (device_txqueue_s, device_txqueue_r) = mpsc::channel::<Vec<u8>>(100);
-    let (device_rxqueue_s, device_rxqueue_r) = mpsc::channel::<Vec<u8>>(100);
+pub fn setup_engine(
+    conf: Ini
+) -> (VpnEngine <'static>, mpsc::Sender<ProxyMessage>, mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Vec<u8>>, mpsc::Sender<Vec<u8>>){
+    let (device_vpn_sender, device_vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (device_local_sender, device_local_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (device_rx_sender, device_rx_receiver) = mpsc::channel::<Vec<u8>>(100);
     let (control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
 
     let (iface, device) =
-        setup_smoltcp_iface(conf.clone(), device_rxqueue_r, device_txqueue_s).unwrap();
+        setup_smoltcp_iface(conf.clone(), device_rx_receiver, device_vpn_sender, device_local_sender).unwrap();
 
-    let vpn_sockets = SocketSet::new(vec![]);
-    let socks5_sockets = SocketSet::new(vec![]);
-
-    let endpoint: SocketAddr = conf
-        .get_from(Some("Peer"), "Endpoint")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let sockets = SocketSet::new(vec![]);
     
     let connection_map = HashMap::<u64, (SocketHandle, mpsc::Sender<Vec<u8>>)>::new();
 
     (VpnEngine {
         iface: iface,
-        vpn_sockets: vpn_sockets,
-        socks5_sockets: socks5_sockets,
+        sockets: sockets,
         device: device,
-        endpoint: endpoint,
-        boring_send_channel: udp_send_channel,
-        boring_recv_channel: udp_recv_channel,
-        device_rx_sender: device_rxqueue_s,
-        device_tx_receiver: device_txqueue_r,
         control_receiver: control_receiver,
         connection_map: connection_map
-    }, control_sender)
+    }, control_sender, device_vpn_receiver, device_local_receiver, device_rx_sender)
 }
 pub fn setup_smoltcp_iface(
     conf: Ini,
     rx_queue: mpsc::Receiver<Vec<u8>>,
-    tx_queue: mpsc::Sender<Vec<u8>>,
+    vpn_queue: mpsc::Sender<Vec<u8>>,
+    local_queue: mpsc::Sender<Vec<u8>>,
 ) -> Result<(Interface, MyVirtualDevice)> {
     let config = Config::new(HardwareAddress::Ip);
 
     let mut device = MyVirtualDevice {
         rx_queue: rx_queue,
-        tx_queue: tx_queue,
+        vpn_tx: vpn_queue,
+        local_tx: local_queue
     };
 
     let vpn_ip: IpCidr = conf
@@ -66,11 +54,19 @@ pub fn setup_smoltcp_iface(
         .parse::<IpCidr>()
         .unwrap();
 
+    let gateway_ip: Ipv4Address = conf
+        .get_from(Some("Interface"), "DNS")
+        .unwrap()
+        .parse::<Ipv4Address>()
+        .unwrap();
+
     let mut iface = Interface::new(config, &mut device, smoltcp::time::Instant::now());
 
     iface.update_ip_addrs(|addrs| {
         addrs.push(vpn_ip).unwrap();
     });
+
+    iface.routes_mut().add_default_ipv4_route(gateway_ip).unwrap();
 
     Ok((iface, device))
 }

@@ -1,12 +1,14 @@
-use boringtun::noise::{Tunn};
+use boringtun::noise::Tunn;
+use etherparse::{Ipv4Header, TcpHeader};
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
+use smoltcp::wire::{Ipv4Address, Ipv4Packet};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
-use etherparse::{Ipv4Header, TcpHeader};
 
+const LOCAL_IP: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
 
 pub enum ProxyMessage {
     Connect {
@@ -15,7 +17,7 @@ pub enum ProxyMessage {
         resp: oneshot::Sender<Option<SocketHandle>>,
     },
     Close {
-        handle : SocketHandle,
+        handle: SocketHandle,
         resp: oneshot::Sender<bool>,
     },
 }
@@ -27,22 +29,16 @@ pub struct ChannelMessage {
 
 pub struct VpnEngine<'a> {
     pub iface: Interface,
-    pub vpn_sockets: SocketSet<'a>,
-    pub socks5_sockets: SocketSet<'a>,
+    pub sockets: SocketSet<'a>,
     pub device: MyVirtualDevice,
-    pub endpoint: SocketAddr,
-    pub boring_send_channel: mpsc::Sender<Vec<u8>>,
-    pub boring_recv_channel: mpsc::Receiver<Vec<u8>>,
-    pub device_rx_sender: mpsc::Sender<Vec<u8>>,
-    pub device_tx_receiver: mpsc::Receiver<Vec<u8>>,
     pub control_receiver: mpsc::Receiver<ProxyMessage>,
-    pub connection_map: HashMap<u64, (SocketHandle, mpsc::Sender<Vec<u8>>)>
+    pub connection_map: HashMap<u64, (SocketHandle, mpsc::Sender<Vec<u8>>)>,
 }
-
 
 pub struct MyVirtualDevice {
     pub rx_queue: mpsc::Receiver<Vec<u8>>,
-    pub tx_queue: mpsc::Sender<Vec<u8>>,
+    pub vpn_tx: mpsc::Sender<Vec<u8>>,
+    pub local_tx: mpsc::Sender<Vec<u8>>,
 }
 
 impl Device for MyVirtualDevice {
@@ -61,7 +57,8 @@ impl Device for MyVirtualDevice {
             Ok(buffer) => Some((
                 ChannelRxToken { buffer },
                 ChannelTxToken {
-                    tx_queue: &self.tx_queue,
+                    vpn_tx: &self.vpn_tx,
+                    local_tx: &self.local_tx,
                 },
             )),
             Err(_) => None,
@@ -70,7 +67,8 @@ impl Device for MyVirtualDevice {
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
         Some(ChannelTxToken {
-            tx_queue: &self.tx_queue,
+            vpn_tx: &self.vpn_tx,
+            local_tx: &self.local_tx,
         })
     }
 
@@ -97,7 +95,8 @@ impl RxToken for ChannelRxToken {
 }
 
 pub struct ChannelTxToken<'a> {
-    tx_queue: &'a mpsc::Sender<Vec<u8>>,
+    vpn_tx: &'a mpsc::Sender<Vec<u8>>,
+    local_tx: &'a mpsc::Sender<Vec<u8>>,
 }
 impl<'a> TxToken for ChannelTxToken<'a> {
     fn consume<R, F>(self, len: usize, f: F) -> R
@@ -107,14 +106,20 @@ impl<'a> TxToken for ChannelTxToken<'a> {
         let mut buffer: Vec<u8> = vec![0u8; len];
         let result: R = f(&mut buffer);
 
-        let (ip_header, packet) = Ipv4Header::from_slice(buffer.as_slice()).unwrap();
-        println!("ENGINE TRY SEND IP {:?}", ip_header);
+        if let Ok(packet) = Ipv4Packet::new_checked(&buffer) {
+            let dst = packet.dst_addr();
 
-        let (tcp, _tcp_data) = TcpHeader::from_slice(packet).unwrap();
-        println!("ENGINE TCP {:?}", tcp);
-        if let Err(e) = self.tx_queue.try_send(buffer) {
-            eprintln!("ENGINE TX CHANNEL FULL {}", e);
+            if dst.is_loopback() || dst == LOCAL_IP {
+                if let Err(e) = self.local_tx.try_send(buffer) {
+                    eprintln!("ENGINE LOCAL TX CHANNEL FULL {}", e);
+                }
+            } else {
+                if let Err(e) = self.vpn_tx.try_send(buffer) {
+                    eprintln!("ENGINE VPN TX CHANNEL FULL {}", e);
+                }
+            }
         }
+
         result
     }
 }

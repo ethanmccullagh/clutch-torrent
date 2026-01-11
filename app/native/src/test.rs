@@ -20,14 +20,24 @@ const TARGET_IP: [u8; 4] = [8, 8, 8, 8]; // Google DNS
 //by-passes smoltcp interface entirely
 pub fn ping_test(engine: &mut VpnEngine) {
     let ping_packet = create_icmp_packet(MY_VPN_IP, TARGET_IP);
+    let mut reponse_read = true;
+    let sender = engine.device.vpn_tx.clone();
+    let receiver = &mut engine.device.rx_queue;
 
     loop {
         //Send google ping
-        println!("TEST: Sending ping to google");
-        let _ = engine.boring_send(ping_packet.clone());
 
+        if reponse_read {
+            println!("TEST: Sending ping to google");
+            let _ = sender.try_send(ping_packet.clone());
+            reponse_read = false;
+        }
         println!("TEST: waiting on response...");
-        while let Ok(msg) = engine.boring_recv() {
+        while let Ok(msg) = receiver.try_recv() {
+            if !reponse_read {
+                reponse_read = true
+            }
+
             println!("TEST: Response Received!");
             if parse_and_print_icmp(msg.as_slice()) {
                 println!("TEST: Done!");
