@@ -6,6 +6,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
+
 pub async fn spawn_boring_threads(
     tunn: Tunn,
     endpoint: SocketAddr,
@@ -47,7 +48,7 @@ async fn udp_recv_task(
             //println!("-->BORING RECEIVE: packet received from network");
 
             if addr != endpoint {
-                //println!("-->RECEIVE: wrong endpoint");
+                println!("-->RECEIVE: wrong endpoint");
                 continue;
             }
 
@@ -60,13 +61,16 @@ async fn udp_recv_task(
                         break;
                     }
                     TunnResult::WriteToNetwork(b) => {
+                        //print_packet(b);
                         let _ = socket.send_to(b, addr).await;
-                        //println!("-->RECEIVE: packet sent to network");
+                        
+                        println!("-->Boring RECEIVE: packet sent to network");
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);
                     }
                     TunnResult::WriteToTunnelV4(b, _) => {
+                        //parse_and_print_icmp(b);
                         let _ = sender.send(b.to_vec()).await;
-                        //println!("-->RECEIVE: packet sent to channel");
+                        println!("-->BORING RECEIVE: packet sent to channel");
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);
                     }
                     _ => {
@@ -91,16 +95,16 @@ async fn udp_transmit_task(
     loop {
         //println!("-->TRANSMIT: waiting");
         if let Some(msg) = receiver.recv().await {
-            //println!("-->TRANSMIT: packet received from channel");
+            //println!("-->BORING TRANSMIT: packet received from channel");
 
             let mut tunn = t.lock().await;
 
             match tunn.encapsulate(msg.as_slice(), &mut buffer) {
                 TunnResult::WriteToNetwork(encrypted_bytes) => {
                     let _ = socket.send_to(encrypted_bytes, &endpoint).await;
-                    //println!("-->TRANSMIT: packet sent to network");
+                    println!("-->BORING TRANSMIT: packet sent to network");
                 }
-                TunnResult::Err(e) => println!("Tunnel encap error {:?}", e),
+                TunnResult::Err(e) => println!("BORING Tunnel encap error {:?}", e),
                 _ => {}
             }
 

@@ -1679,6 +1679,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "boringtun",
+ "byteorder",
  "etherparse",
  "librqbit",
  "managed",
@@ -2518,6 +2519,8 @@ dependencies = [
  "cfg-if",
  "defmt 0.3.100",
  "heapless",
+ "libc",
+ "log",
  "managed",
 ]
 

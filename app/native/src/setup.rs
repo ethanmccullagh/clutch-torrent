@@ -4,49 +4,31 @@ use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
 use core::net::SocketAddr;
 use ini::Ini;
-use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
+use smoltcp::iface::{Config, Interface, SocketSet};
+use smoltcp::phy::Tracer;
 use smoltcp::wire::{HardwareAddress, IpCidr, Ipv4Address};
-use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use crate::schema::*;
 
-pub fn setup_engine(
-    conf: Ini
-) -> (VpnEngine <'static>, mpsc::Sender<ProxyMessage>, mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Vec<u8>>, mpsc::Sender<Vec<u8>>){
-    let (device_vpn_sender, device_vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
-    let (device_local_sender, device_local_receiver) = mpsc::channel::<Vec<u8>>(100);
-    let (device_rx_sender, device_rx_receiver) = mpsc::channel::<Vec<u8>>(100);
-    let (control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
-
-    let (iface, device) =
-        setup_smoltcp_iface(conf.clone(), device_rx_receiver, device_vpn_sender, device_local_sender).unwrap();
-
-    let sockets = SocketSet::new(vec![]);
-    
-    let connection_map = HashMap::<u64, (SocketHandle, mpsc::Sender<Vec<u8>>)>::new();
-
-    (VpnEngine {
-        iface: iface,
-        sockets: sockets,
-        device: device,
-        control_receiver: control_receiver,
-        connection_map: connection_map
-    }, control_sender, device_vpn_receiver, device_local_receiver, device_rx_sender)
-}
-pub fn setup_smoltcp_iface(
+pub fn setup_engine<'a>(
     conf: Ini,
-    rx_queue: mpsc::Receiver<Vec<u8>>,
-    vpn_queue: mpsc::Sender<Vec<u8>>,
-    local_queue: mpsc::Sender<Vec<u8>>,
-) -> Result<(Interface, MyVirtualDevice)> {
+    device_receiver: mpsc::Receiver<Vec<u8>>,
+    vpn_sender: mpsc::Sender<Vec<u8>>,
+    local_sender: mpsc::Sender<Vec<u8>>,
+) -> (Interface, Tracer<MyVirtualDevice>, SocketSet<'a>) {
     let config = Config::new(HardwareAddress::Ip);
 
-    let mut device = MyVirtualDevice {
-        rx_queue: rx_queue,
-        vpn_tx: vpn_queue,
-        local_tx: local_queue
+    let device = MyVirtualDevice {
+        rx_queue: device_receiver,
+        vpn_tx: vpn_sender,
+        local_tx: local_sender,
     };
+
+    let mut tracer = Tracer::new(device, |_device, printer| {
+        println!("---TRACER---");
+        println!("{}", printer);
+    });
 
     let vpn_ip: IpCidr = conf
         .get_from(Some("Interface"), "Address")
@@ -54,21 +36,28 @@ pub fn setup_smoltcp_iface(
         .parse::<IpCidr>()
         .unwrap();
 
-    let gateway_ip: Ipv4Address = conf
+    let _gateway_ip: Ipv4Address = conf
         .get_from(Some("Interface"), "DNS")
         .unwrap()
         .parse::<Ipv4Address>()
         .unwrap();
 
-    let mut iface = Interface::new(config, &mut device, smoltcp::time::Instant::now());
+    let mut iface = Interface::new(config, &mut tracer, smoltcp::time::Instant::now());
 
     iface.update_ip_addrs(|addrs| {
-        addrs.push(vpn_ip).unwrap();
+        addrs.push(IpCidr::new(vpn_ip.address(), 24)).unwrap();
     });
 
-    iface.routes_mut().add_default_ipv4_route(gateway_ip).unwrap();
+    //iface
+    //    .routes_mut()
+    //    .add_default_ipv4_route(gateway_ip)
+    //    .unwrap();
 
-    Ok((iface, device))
+    iface.set_any_ip(true);
+
+    let sockets = SocketSet::new(vec![]);
+
+    (iface, tracer, sockets)
 }
 
 pub fn setup_tunnel(conf: Ini) -> (Tunn, SocketAddr) {
@@ -90,7 +79,8 @@ pub fn setup_tunnel(conf: Ini) -> (Tunn, SocketAddr) {
         Some(25),
         1,
         None,
-    ).unwrap();
+    )
+    .unwrap();
     (tunnel, endpoint)
 }
 

@@ -1,38 +1,48 @@
-use boringtun::noise::Tunn;
-use etherparse::{Ipv4Header, TcpHeader};
-use smoltcp::iface::{Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+
+use smoltcp::iface::{SocketHandle};
+use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken, Checksum};
 use smoltcp::time::Instant;
 use smoltcp::wire::{Ipv4Address, Ipv4Packet};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 
 const LOCAL_IP: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
 
+pub enum SocketType {
+    TCP,
+    UDP,
+    ICMP
+}
+
+
 pub enum ProxyMessage {
     Connect {
-        addr: [u8; 4],
-        port: u16,
+        addr: Option<[u8; 4]>,
+        port: Option<u16>,
         resp: oneshot::Sender<Option<SocketHandle>>,
+        socket_type: SocketType
     },
     Close {
         handle: SocketHandle,
         resp: oneshot::Sender<bool>,
+    },
+    Read {
+        handle: SocketHandle,
+        resp: oneshot::Sender<Option<Vec<u8>>>,
+    },
+    Write {
+        handle: SocketHandle,
+        data: Vec<u8>,
+        dst: Option<[u8;4]>,
+        resp: oneshot::Sender<bool>,
+        send_at: Instant,
+        socket_type: SocketType
     },
 }
 
 pub struct ChannelMessage {
     pub data: Vec<u8>,
     pub addr: SocketAddr,
-}
-
-pub struct VpnEngine<'a> {
-    pub iface: Interface,
-    pub sockets: SocketSet<'a>,
-    pub device: MyVirtualDevice,
-    pub control_receiver: mpsc::Receiver<ProxyMessage>,
-    pub connection_map: HashMap<u64, (SocketHandle, mpsc::Sender<Vec<u8>>)>,
 }
 
 pub struct MyVirtualDevice {
@@ -76,6 +86,7 @@ impl Device for MyVirtualDevice {
         let mut caps: DeviceCapabilities = DeviceCapabilities::default();
         caps.max_transmission_unit = 1500;
         caps.medium = Medium::Ip; // We work at the IP layer, not Ethernet
+        caps.checksum.icmpv4 = Checksum::Tx;
         caps
     }
 }
@@ -90,6 +101,7 @@ impl RxToken for ChannelRxToken {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
+        //println!("ENGINE: packet received");
         f(&mut self.buffer)
     }
 }
@@ -103,10 +115,13 @@ impl<'a> TxToken for ChannelTxToken<'a> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
+        //println!("ENGINE: TRANSMIT");
         let mut buffer: Vec<u8> = vec![0u8; len];
         let result: R = f(&mut buffer);
+        
 
         if let Ok(packet) = Ipv4Packet::new_checked(&buffer) {
+            
             let dst = packet.dst_addr();
 
             if dst.is_loopback() || dst == LOCAL_IP {

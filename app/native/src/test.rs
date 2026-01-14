@@ -1,103 +1,151 @@
-use crate::schema::VpnEngine;
-use crate::{helper::*, schema::ProxyMessage};
-use boringtun::noise::TunnResult;
-use smoltcp::iface::SocketHandle;
-use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use crate::helper::*;
+use crate::schema::{ProxyMessage, SocketType};
+use smoltcp::phy::ChecksumCapabilities;
+use smoltcp::socket::Socket;
+use smoltcp::time::Instant;
+use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr};
+use std::str::FromStr;
 use std::thread::sleep;
-use tokio::net::{TcpListener, TcpSocket};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
-use smoltcp::socket::tcp;
-use std::time::{Duration, Instant};
+const MY_VPN_IP: [u8; 4] = [10, 2, 0, 2];
+const TARGET_IP: [u8; 4] = [8, 8, 8, 8];
 
-// --- CONFIGURATION (Replace these with your ProtonVPN details) ---
-const MY_VPN_IP: [u8; 4] = [10, 2, 0, 2]; // Your interface Address (e.g. 10.2.0.2)
-const TARGET_IP: [u8; 4] = [8, 8, 8, 8]; // Google DNS
-
-//inject icmp packet directly into smoltcp transmit queue
-//test boringtun/udp socket logic
-//by-passes smoltcp interface entirely
-pub fn ping_test(engine: &mut VpnEngine) {
+//Unit Test for boringtun
+pub fn ping_test(
+    vpn_sender: &mpsc::Sender<Vec<u8>>,
+    device_receiver: &mut mpsc::Receiver<Vec<u8>>,
+) {
     let ping_packet = create_icmp_packet(MY_VPN_IP, TARGET_IP);
     let mut reponse_read = true;
-    let sender = engine.device.vpn_tx.clone();
-    let receiver = &mut engine.device.rx_queue;
+    let mut success = false;
 
     loop {
-        //Send google ping
-
         if reponse_read {
             println!("TEST: Sending ping to google");
-            let _ = sender.try_send(ping_packet.clone());
+            let _ = vpn_sender.try_send(ping_packet.clone());
             reponse_read = false;
         }
         println!("TEST: waiting on response...");
-        while let Ok(msg) = receiver.try_recv() {
+        while let Ok(msg) = device_receiver.try_recv() {
             if !reponse_read {
                 reponse_read = true
             }
 
             println!("TEST: Response Received!");
             if parse_and_print_icmp(msg.as_slice()) {
-                println!("TEST: Done!");
-                return;
+                success = true;
+            } else {
+                sleep(Duration::from_millis(1000));
             }
+        }
+
+        if success {
+            println!("TEST: Done!");
+            return;
         }
         sleep(Duration::from_millis(200));
     }
 }
-
-pub async fn connection_test(control_sender: mpsc::Sender<ProxyMessage>) {
-    let (callback_send, callback_receive) = oneshot::channel();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let proxy_addr = listener.local_addr().unwrap();
-    let port = proxy_addr.port();
-
-    println!("TCP listener created on port: {:?}", proxy_addr);
-
-    let mut connection_map = HashMap::<u64, SocketHandle>::new();
-
-    let _ = control_sender
-        .send(ProxyMessage::Connect {
-            addr: [127, 0, 0, 1],
-            port: port,
-            resp: callback_send,
-        })
-        .await;
-
-    println!("TEST: waiting on accept: {:?}", port);
-
-    match listener.accept().await {
-        Ok((stream, addr)) => {
-            println!("TCP stream confirmed: {:?}", stream);
-            println!("TCP stream addr: {:?}", addr);
-        }
-        Err(e) => println!("TEST: accept failed {:?}", e),
-    }
-
-    if let Some(handle) = callback_receive.await.unwrap() {
-        let mut hasher = DefaultHasher::new();
-        port.hash(&mut hasher);
-        connection_map.insert(hasher.finish(), handle);
-    } else {
-        println!("Callback failed: None returned");
-    }
-}
-
 //Same google ping as before
 //Now packet is sent through tcp socket connected to smoltcp interface
 //Verifies socket control and smoltcp internal logic
 pub async fn socket_test(control_sender: mpsc::Sender<ProxyMessage>) {
-
-    //create a new socket
-
     //send connection message
 
-    //confirm connection
+    let (s, r) = oneshot::channel();
+    let _ = control_sender
+        .send(ProxyMessage::Connect {
+            addr: None,
+            port: None,
+            resp: s,
+            socket_type: SocketType::ICMP,
+        })
+        .await;
+    println!("ICMP socket created");
+
+    if let Some(handle) = r.await.unwrap() {
+        let (s2, r2) = oneshot::channel();
+
+        let _ = control_sender
+            .send(ProxyMessage::Write {
+                handle,
+                data: b"hello google".to_vec(),
+                dst: Some([8, 8, 8, 8]),
+                resp: s2,
+                socket_type: SocketType::ICMP,
+                send_at: Instant::from_millis(0),
+            })
+            .await;
+
+        if r2.await.unwrap() {
+            println!("ICMP PACKET SENT");
+        }
+    }
 
     //start sending test packets to socket
 
     //await reponse on socket
+}
+
+//Test SOCKS5 proxy by connecting through it
+pub async fn socks5_test() -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    println!("TEST: Connecting to SOCKS5 proxy at 127.0.0.1:1080");
+    let mut stream = TcpStream::connect("127.0.0.1:1080").await?;
+
+    // SOCKS5 handshake
+    stream.write_all(&[5, 1, 0]).await?;
+    let mut resp = [0u8; 2];
+    stream.read_exact(&mut resp).await?;
+
+    if resp[0] != 5 || resp[1] != 0 {
+        return Err("SOCKS5 handshake failed".into());
+    }
+    println!("TEST: SOCKS5 handshake successful");
+
+    // CONNECT to 8.8.8.8:80
+    stream
+        .write_all(&[
+            5, 1, 0, 1, // VER, CMD=CONNECT, RSV, ATYP=IPv4
+            8, 8, 8, 8, // IP: 8.8.8.8
+            0, 80, // Port: 80
+        ])
+        .await?;
+
+    let mut connect_resp = [0u8; 10];
+    stream.read_exact(&mut connect_resp).await?;
+
+    if connect_resp[0] != 5 || connect_resp[1] != 0 {
+        return Err(format!("SOCKS5 CONNECT failed: {}", connect_resp[1]).into());
+    }
+    println!("TEST: SOCKS5 CONNECT to 8.8.8.8:80 successful!");
+
+    // Send HTTP request
+    stream
+        .write_all(b"GET / HTTP/1.0\r\nHost: 8.8.8.8\r\n\r\n")
+        .await?;
+    println!("TEST: Sent HTTP request");
+
+    // Read response
+    let mut buffer = [0u8; 1024];
+    match tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        stream.read(&mut buffer),
+    )
+    .await
+    {
+        Ok(Ok(n)) if n > 0 => {
+            println!("TEST: Received {} bytes response", n);
+            println!("TEST: {}", String::from_utf8_lossy(&buffer[..n.min(200)]));
+            println!("✅ SOCKS5 to VPN test PASSED!");
+            Ok(())
+        }
+        Ok(Ok(_)) => Err("Connection closed".into()),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err("Timeout waiting for response".into()),
+    }
 }

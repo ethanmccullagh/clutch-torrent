@@ -1,34 +1,46 @@
 use ini::Ini;
+use smoltcp::time::Instant;
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
-
 //import other files
+pub mod boringthreads;
 pub mod engine;
 pub mod helper;
 pub mod schema;
 pub mod setup;
-pub mod socks5;
 pub mod test;
-pub mod boringthreads;
 
 //mod test;
+use boringthreads::spawn_boring_threads;
 use setup::*;
 use test::*;
-use boringthreads::spawn_boring_threads;
+use engine::run_engine;
+
+use crate::schema::ProxyMessage;
 
 #[tokio::main]
 async fn main() {
     //load config file from path
     let conf = Ini::load_from_file("/home/ethanm/Downloads/cachy-CA-1149.conf").unwrap();
 
-    let (mut engine, control_sender, vpn_receiver, local_receiver, device_sender) = setup_engine(conf.clone());
+    //Communication channels for sync engine <--> async tasks
+    let (vpn_sender, mut vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (local_sender, local_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (device_sender, mut device_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
 
-    let (tunn, endpoint) = setup_tunnel(conf);
-    let _task_handles = spawn_boring_threads(tunn, endpoint, vpn_receiver, device_sender).await.unwrap();
+    //setup and start vpn tunnel tasks
+    let (tunn, endpoint) = setup_tunnel(conf.clone());
+    let _boring_handles = spawn_boring_threads(tunn, endpoint, vpn_receiver, device_sender.clone())
+        .await
+        .unwrap();
 
+    //ping_test(&vpn_sender, &mut device_receiver);
+    //let _join_handle = tokio::spawn (gateway_test(control_sender, device_sender, local_receiver));
 
-    ping_test(&mut engine);
+    tokio::spawn(socket_test(control_sender));
 
-    //let _joinhandle = tokio::spawn(connection_test(control_sender));
-
+    run_engine(conf, device_receiver, vpn_sender, local_sender, control_receiver);
 }
