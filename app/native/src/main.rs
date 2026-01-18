@@ -24,7 +24,7 @@ use crate::schema::ProxyMessage;
 #[tokio::main]
 async fn main() {
     //load config file from path
-    let conf = Ini::load_from_file("/home/ethanm/Downloads/cachy-CA-1149.conf").unwrap();
+    let conf = Ini::load_from_file("/home/ethanm/Downloads/cachy3-CA-1208.conf").unwrap();
 
     //Communication channels for sync engine <--> async tasks
     let (vpn_sender, mut vpn_receiver) = mpsc::channel::<Vec<u8>>(100);

@@ -12,7 +12,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-pub async fn run_engine(
+pub fn run_engine(
     conf: Ini,
     device_receiver: mpsc::Receiver<Vec<u8>>,
     vpn_sender: mpsc::Sender<Vec<u8>>,
@@ -34,16 +34,6 @@ pub async fn run_engine(
             &mut connection_map,
         );
         poll_sockets(&mut socket_set, &mut connection_map);
-
-
-        loop{
-            match control_receiver.poll_recv() {
-                Poll::Ready
-            }
-
-            match device_receiver.poll_recv(
-        }
-
 
         if let Some(delay) = iface.poll_delay(Instant::now(), &socket_set) {
             println!("Engine Poll Delay: {:?}", delay.micros());
