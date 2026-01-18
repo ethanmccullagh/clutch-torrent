@@ -10,13 +10,14 @@ pub mod engine;
 pub mod helper;
 pub mod schema;
 pub mod setup;
+pub mod socks5;
 pub mod test;
 
 //mod test;
 use boringthreads::spawn_boring_threads;
+use engine::run_engine;
 use setup::*;
 use test::*;
-use engine::run_engine;
 
 use crate::schema::ProxyMessage;
 
@@ -42,5 +43,11 @@ async fn main() {
 
     tokio::spawn(socket_test(control_sender));
 
-    run_engine(conf, device_receiver, vpn_sender, local_sender, control_receiver);
+    run_engine(
+        conf,
+        device_receiver,
+        vpn_sender,
+        local_sender,
+        control_receiver,
+    );
 }

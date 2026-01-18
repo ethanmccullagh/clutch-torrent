@@ -1680,9 +1680,11 @@ dependencies = [
  "base64 0.22.1",
  "boringtun",
  "byteorder",
+ "bytes",
  "etherparse",
  "librqbit",
  "managed",
+ "pretty-hex",
  "rust-ini",
  "smoltcp",
  "socks5-impl",
@@ -1970,6 +1972,12 @@ checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
 ]
+
+[[package]]
+name = "pretty-hex"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbc83ee4a840062f368f9096d80077a9841ec117e17e7f700df81958f1451254"
 
 [[package]]
 name = "proc-macro-error-attr2"

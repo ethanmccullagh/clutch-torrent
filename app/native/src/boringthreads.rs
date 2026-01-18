@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
+use pretty_hex::*;
 
 
 pub async fn spawn_boring_threads(
@@ -64,13 +65,19 @@ async fn udp_recv_task(
                         //print_packet(b);
                         let _ = socket.send_to(b, addr).await;
                         
-                        println!("-->Boring RECEIVE: packet sent to network");
+                        //println!("-->Boring RECEIVE: packet sent to network");
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);
                     }
                     TunnResult::WriteToTunnelV4(b, _) => {
                         //parse_and_print_icmp(b);
+                        //println!("{:?}", b.hex_dump());
+                        
+                        //Drop Proton MTU Probe
+                        if b.len() > 20 && b.windows(16).any(|w| w == b"Proton VPN MTU P") {
+                            break;
+                        }
                         let _ = sender.send(b.to_vec()).await;
-                        println!("-->BORING RECEIVE: packet sent to channel");
+                        //println!("-->BORING RECEIVE: packet sent to channel");
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);
                     }
                     _ => {
@@ -102,7 +109,7 @@ async fn udp_transmit_task(
             match tunn.encapsulate(msg.as_slice(), &mut buffer) {
                 TunnResult::WriteToNetwork(encrypted_bytes) => {
                     let _ = socket.send_to(encrypted_bytes, &endpoint).await;
-                    println!("-->BORING TRANSMIT: packet sent to network");
+                    //println!("-->BORING TRANSMIT: packet sent to network");
                 }
                 TunnResult::Err(e) => println!("BORING Tunnel encap error {:?}", e),
                 _ => {}

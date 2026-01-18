@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose, Engine as _};
 use etherparse::PacketBuilder;
 use etherparse::{Icmpv4Header, Ipv4HeaderSlice};
+use smoltcp::wire::IpAddress;
 
 // Helper: Decode Base64 WireGuard keys to 32-byte arrays
 pub fn decode_key(b64: &str) -> Result<[u8; 32], String> {
@@ -22,26 +23,17 @@ pub fn create_icmp_packet(src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
     result
 }
 
-pub fn print_packet(packet: &[u8]){
-    if let Ok(ip_header) = Ipv4HeaderSlice::from_slice(packet) {
-        let icmp_offset = ip_header.slice().len();
-        if let Ok((icmp_header, _body)) = Icmpv4Header::from_slice(&packet[icmp_offset..]) {
-            println!("   Type: {:?}", icmp_header.icmp_type); // Should be EchoReply (0)
-            println!("   Source IP: {:?}", ip_header.source_addr());
-        }
-    } else {
-        if packet.len() > 0 {
-            let version = packet[0] >> 4;
-            println!(
-                "INCOMING PACKET: Version={}, Length={}, Packet bytes={:02x?}",
-                version,
-                packet.len(),
-                &packet
-            );
-        } else {
-            println!("empty packet");
+pub fn parse_and_print_icmp_noip(packet: &[u8], addr: IpAddress) -> bool {
+    // Skip IPv4 Header (usually 20 bytes) to get to ICMP
+    if let Ok((icmp_header, _body)) = Icmpv4Header::from_slice(&packet) {
+        println!("   Type: {:?}", icmp_header.icmp_type); // Should be EchoReply (0)
+        println!("   Source IP: {:?}", addr);
+        if matches!(icmp_header.icmp_type, etherparse::Icmpv4Type::EchoReply(_)) {
+            println!("🎉 SUCCESS: Google replied!");
+            return true;
         }
     }
+    return false;
 }
 
 pub fn parse_and_print_icmp(packet: &[u8]) -> bool {

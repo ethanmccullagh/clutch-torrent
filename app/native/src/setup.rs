@@ -36,7 +36,7 @@ pub fn setup_engine<'a>(
         .parse::<IpCidr>()
         .unwrap();
 
-    let _gateway_ip: Ipv4Address = conf
+    let gateway_ip: Ipv4Address = conf
         .get_from(Some("Interface"), "DNS")
         .unwrap()
         .parse::<Ipv4Address>()
@@ -45,13 +45,13 @@ pub fn setup_engine<'a>(
     let mut iface = Interface::new(config, &mut tracer, smoltcp::time::Instant::now());
 
     iface.update_ip_addrs(|addrs| {
-        addrs.push(IpCidr::new(vpn_ip.address(), 24)).unwrap();
+        addrs.push(IpCidr::new(vpn_ip.address(), 32)).unwrap();
     });
 
-    //iface
-    //    .routes_mut()
-    //    .add_default_ipv4_route(gateway_ip)
-    //    .unwrap();
+    iface
+        .routes_mut()
+        .add_default_ipv4_route(gateway_ip)
+        .unwrap();
 
     iface.set_any_ip(true);
 

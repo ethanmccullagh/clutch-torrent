@@ -1,42 +1,53 @@
-
-use smoltcp::iface::{SocketHandle};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken, Checksum};
+use bytes::Bytes;
+use smoltcp::iface::SocketHandle;
+use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
-use smoltcp::wire::{Ipv4Address, Ipv4Packet};
+use smoltcp::wire::{IpAddress, Ipv4Address, Ipv4Packet};
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 
 const LOCAL_IP: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
 
-pub enum SocketType {
-    TCP,
-    UDP,
-    ICMP
+pub type SocketReadChannel = (Bytes, IpAddress);
+
+pub enum WriteMessage {
+    ICMP {
+        handle: SocketHandle,
+        dst: [u8; 4],
+        ident: u16,
+        seq: u16,
+    },
+    TCP {},
+    UDP {},
+    RAW {
+        data: Vec<u8>,
+        resp: oneshot::Sender<bool>,
+    },
 }
 
+pub enum ConnectMessage {
+    ICMP {
+        resp: oneshot::Sender<Option<SocketHandle>>,
+        read: mpsc::Sender<SocketReadChannel>,
+    },
+    TCP {
+        addr: [u8; 4],
+        port: i32,
+        connect: bool,
+        resp: oneshot::Sender<Option<SocketHandle>>,
+    },
+}
 
 pub enum ProxyMessage {
     Connect {
-        addr: Option<[u8; 4]>,
-        port: Option<u16>,
-        resp: oneshot::Sender<Option<SocketHandle>>,
-        socket_type: SocketType
+        msg: ConnectMessage,
     },
     Close {
         handle: SocketHandle,
         resp: oneshot::Sender<bool>,
     },
-    Read {
-        handle: SocketHandle,
-        resp: oneshot::Sender<Option<Vec<u8>>>,
-    },
     Write {
-        handle: SocketHandle,
-        data: Vec<u8>,
-        dst: Option<[u8;4]>,
-        resp: oneshot::Sender<bool>,
-        send_at: Instant,
-        socket_type: SocketType
+        msg: WriteMessage,
     },
 }
 
@@ -84,7 +95,7 @@ impl Device for MyVirtualDevice {
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps: DeviceCapabilities = DeviceCapabilities::default();
-        caps.max_transmission_unit = 1500;
+        caps.max_transmission_unit = 1280;
         caps.medium = Medium::Ip; // We work at the IP layer, not Ethernet
         caps.checksum.icmpv4 = Checksum::Tx;
         caps
@@ -118,10 +129,8 @@ impl<'a> TxToken for ChannelTxToken<'a> {
         //println!("ENGINE: TRANSMIT");
         let mut buffer: Vec<u8> = vec![0u8; len];
         let result: R = f(&mut buffer);
-        
 
         if let Ok(packet) = Ipv4Packet::new_checked(&buffer) {
-            
             let dst = packet.dst_addr();
 
             if dst.is_loopback() || dst == LOCAL_IP {

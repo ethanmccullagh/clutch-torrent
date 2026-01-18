@@ -1,24 +1,18 @@
-use crate::schema::{ChannelMessage, ProxyMessage, SocketType};
+use crate::schema::{ConnectMessage, ProxyMessage, SocketReadChannel, WriteMessage};
 use crate::setup::setup_engine;
-use anyhow::Result;
-use boringtun::noise::TunnResult;
-use byteorder::{ByteOrder, NetworkEndian};
+use bytes::Bytes;
 use ini::Ini;
-use smoltcp::iface::{Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{wait, Device, DeviceCapabilities};
-use smoltcp::socket::{icmp, tcp, udp, Socket};
+use smoltcp::iface::{SocketHandle, SocketSet};
+use smoltcp::phy::{Device, DeviceCapabilities};
+use smoltcp::socket::{icmp, tcp, Socket};
 use smoltcp::time::Instant;
-use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress, IpListenEndpoint};
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::os::unix::io::AsRawFd;
+use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress};
+use std::collections::HashMap;
 use std::thread::sleep;
 use std::time::Duration;
-use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
-// --- CONFIGURATION (Replace these with your ProtonVPN details) ---
-
-pub fn run_engine(
+pub async fn run_engine(
     conf: Ini,
     device_receiver: mpsc::Receiver<Vec<u8>>,
     vpn_sender: mpsc::Sender<Vec<u8>>,
@@ -28,83 +22,134 @@ pub fn run_engine(
     let (mut iface, mut device, mut socket_set) =
         setup_engine::<'_>(conf, device_receiver, vpn_sender, local_sender);
 
+    let mut connection_map = HashMap::<SocketHandle, mpsc::Sender<SocketReadChannel>>::new();
+
     loop {
         iface.poll(Instant::now(), &mut device, &mut socket_set);
+
         control_recv(
             &mut socket_set,
             device.capabilities().clone(),
             &mut control_receiver,
+            &mut connection_map,
         );
-    }
-}
+        poll_sockets(&mut socket_set, &mut connection_map);
 
-pub fn control_recv(
-    socket_set: &mut SocketSet,
-    device_caps: DeviceCapabilities,
-    control_receiver: &mut mpsc::Receiver<ProxyMessage>,
-) {
-    if let Ok(msg) = control_receiver.try_recv() {
-        print!("Engine control packet received: ");
-        match msg {
-            ProxyMessage::Connect {
-                addr,
-                port,
-                resp,
-                socket_type,
-            } => {
-                println!("Connect");
-                create_socket(addr, port, resp, socket_type, socket_set);
+
+        loop{
+            match control_receiver.poll_recv() {
+                Poll::Ready
             }
-            ProxyMessage::Close { handle, resp } => {
-                println!("Close");
-                let _ = socket_set.remove(handle);
-                let _ = resp.send(true);
-            }
-            ProxyMessage::Read { handle, resp } => {
-                println!("Read");
-                read_from_socket(handle, resp, socket_set);
-            }
-            ProxyMessage::Write {
-                handle,
-                data,
-                dst,
-                resp,
-                socket_type,
-                send_at,
-            } => {
-                println!("Write");
-                write_to_socket(
-                    handle,
-                    data,
-                    dst,
-                    resp,
-                    socket_type,
-                    socket_set,
-                    device_caps,
-                );
-            }
+
+            match device_receiver.poll_recv(
+        }
+
+
+        if let Some(delay) = iface.poll_delay(Instant::now(), &socket_set) {
+            println!("Engine Poll Delay: {:?}", delay.micros());
+            sleep(delay.into());
+        } else {
+            sleep(Duration::from_millis(1));
+            // println!("No delay");
         }
     }
 }
 
-fn create_socket(
-    addr: Option<[u8; 4]>,
-    port: Option<u16>,
-    resp: oneshot::Sender<Option<SocketHandle>>,
-    socket_type: SocketType,
+fn poll_sockets(
     socket_set: &mut SocketSet,
+    connection_map: &mut HashMap<SocketHandle, mpsc::Sender<SocketReadChannel>>,
 ) {
-    match socket_type {
-        SocketType::TCP => {
+    for (handle, socket) in socket_set.iter_mut() {
+        let mut rx_buffer = [0u8; 16384];
+        match socket {
+            Socket::Icmp(sock) => {
+                if sock.can_recv() {
+                    println!("ICMP socket has data");
+                    if let Some(sender) = connection_map.get(&handle) {
+                        while let Ok((data, addr)) = sock.recv() {
+                            match sender.try_send((Bytes::copy_from_slice(data), addr)) {
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                        }
+                    } else {
+                        println!("Sender not found in Connection Map");
+                    }
+                }
+            }
+            Socket::Tcp(sock) => {
+                if sock.can_recv() {
+                    if let Some(sender) = connection_map.get(&handle) {
+                        while sock.can_recv() {
+                            if let Ok(len) = sock.peek_slice(&mut rx_buffer) {
+                                match sender.try_send((
+                                    Bytes::copy_from_slice(&rx_buffer[..len]),
+                                    IpAddress::v4(0, 0, 0, 0),
+                                )) {
+                                    Ok(_) => {}
+                                    Err(_) => {
+                                        println!("TCP READ CHANNEL FULL");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        println!("Sender not found in Connection Map");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn control_recv(
+    socket_set: &mut SocketSet,
+    device_caps: DeviceCapabilities,
+    control_receiver: &mut mpsc::Receiver<ProxyMessage>,
+    connection_map: &mut HashMap<SocketHandle, mpsc::Sender<SocketReadChannel>>,
+) {
+    if let Ok(msg) = control_receiver.try_recv() {
+        print!("Engine control packet received: ");
+        match msg {
+            ProxyMessage::Connect { msg } => {
+                create_socket(msg, socket_set, connection_map);
+            }
+            ProxyMessage::Close { handle, resp } => {
+                let _ = socket_set.remove(handle);
+                let _ = resp.send(true);
+            }
+            ProxyMessage::Write { msg } => {
+                write_to_socket(msg, socket_set, device_caps);
+            }
+        }
+    } else {
+        // println!("No Control Message in channel");
+    }
+}
+
+fn create_socket(
+    msg: ConnectMessage,
+    socket_set: &mut SocketSet,
+    connection_map: &mut HashMap<SocketHandle, mpsc::Sender<SocketReadChannel>>,
+) {
+    match msg {
+        ConnectMessage::TCP {
+            addr,
+            port,
+            connect,
+            resp,
+        } => {
             let rx_buffer = tcp::SocketBuffer::new(vec![0; 16384]);
             let tx_buffer = tcp::SocketBuffer::new(vec![0; 16384]);
             let socket = tcp::Socket::new(rx_buffer, tx_buffer);
 
             let handle = socket_set.add(socket);
 
-            resp.send(Some(handle));
+            let _ = resp.send(Some(handle));
         }
-        SocketType::ICMP => {
+        ConnectMessage::ICMP { resp, read } => {
             let rx_buffer =
                 icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY], vec![0; 256]);
             let tx_buffer =
@@ -113,73 +158,39 @@ fn create_socket(
 
             let handle = socket_set.add(socket);
 
-            resp.send(Some(handle));
+            connection_map.insert(handle, read);
+
+            let _ = resp.send(Some(handle));
         }
-        _ => {}
     }
 }
 
-fn read_from_socket(
-    handle: SocketHandle,
-    resp: oneshot::Sender<Option<Vec<u8>>>,
-    socket_set: &mut SocketSet,
-) {
-    let socket = socket_set.get_mut::<tcp::Socket>(handle);
-    if socket.can_recv() {
-        let mut buffer = vec![0u8; 4096];
-        match socket.recv_slice(&mut buffer) {
-            Ok(len) if len > 0 => {
-                buffer.truncate(len);
-                println!("ENGINE: Read {} bytes from socket", len);
-                let _ = resp.send(Some(buffer));
-                return;
-            }
-            _ => {}
-        }
-    }
-    let _ = resp.send(None);
-}
-
-fn write_to_socket(
-    handle: SocketHandle,
-    data: Vec<u8>,
-    dst: Option<[u8; 4]>,
-    resp: oneshot::Sender<bool>,
-    socket_type: SocketType,
-    socket_set: &mut SocketSet,
-    device_caps: DeviceCapabilities,
-) {
-    let timestamp = Instant::now();
-    match socket_type {
-        SocketType::ICMP => {
+fn write_to_socket(msg: WriteMessage, socket_set: &mut SocketSet, device_caps: DeviceCapabilities) {
+    match msg {
+        WriteMessage::ICMP {
+            handle,
+            dst,
+            ident,
+            seq,
+        } => {
             let socket = socket_set.get_mut::<icmp::Socket>(handle);
 
-            let remote_addr = IpAddress::v4(8, 8, 8, 8);
+            let remote_addr = IpAddress::v4(dst[0], dst[1], dst[2], dst[3]);
 
             if !socket.is_open() {
                 socket.bind(icmp::Endpoint::Ident(0x1234)).unwrap();
             }
-
-            let mut echo_payload = [0xffu8; 40];
-
-            let send_at = timestamp.total_millis()+200;
-
-            NetworkEndian::write_i64(&mut echo_payload, send_at);
-
             let repr = Icmpv4Repr::EchoRequest {
-                ident: 0x1234,
-                seq_no: 1,
-                data: &echo_payload,
+                ident: ident,
+                seq_no: seq,
+                data: &[],
             };
 
             let icmp_payload = socket.send(repr.buffer_len(), remote_addr).unwrap();
             let mut icmp_packet = Icmpv4Packet::new_unchecked(icmp_payload);
 
             repr.emit(&mut icmp_packet, &device_caps.checksum);
-
-            let _ = resp.send(true);
         }
-        SocketType::TCP => {}
-        SocketType::UDP => {}
+        _ => {}
     }
 }

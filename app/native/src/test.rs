@@ -1,13 +1,10 @@
 use crate::helper::*;
-use crate::schema::{ProxyMessage, SocketType};
-use smoltcp::phy::ChecksumCapabilities;
-use smoltcp::socket::Socket;
-use smoltcp::time::Instant;
-use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr};
-use std::str::FromStr;
+use crate::schema::{ConnectMessage, ProxyMessage, SocketReadChannel, WriteMessage};
+use smoltcp::wire::IpAddress;
 use std::thread::sleep;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time;
 
 const MY_VPN_IP: [u8; 4] = [10, 2, 0, 2];
 const TARGET_IP: [u8; 4] = [8, 8, 8, 8];
@@ -51,36 +48,52 @@ pub fn ping_test(
 //Same google ping as before
 //Now packet is sent through tcp socket connected to smoltcp interface
 //Verifies socket control and smoltcp internal logic
+//
+//Sends a ping every 2 seconds
 pub async fn socket_test(control_sender: mpsc::Sender<ProxyMessage>) {
     //send connection message
 
     let (s, r) = oneshot::channel();
+    let (send, mut read) = mpsc::channel::<SocketReadChannel>(10);
+
     let _ = control_sender
         .send(ProxyMessage::Connect {
-            addr: None,
-            port: None,
-            resp: s,
-            socket_type: SocketType::ICMP,
+            msg: ConnectMessage::ICMP {
+                resp: s,
+                read: send,
+            },
         })
         .await;
-    println!("ICMP socket created");
+    //println!("ICMP socket created");
 
     if let Some(handle) = r.await.unwrap() {
-        let (s2, r2) = oneshot::channel();
+        let mut send_ping = true;
+        loop {
+            if send_ping {
+                let _ = control_sender
+                    .send(ProxyMessage::Write {
+                        msg: WriteMessage::ICMP {
+                            handle,
+                            dst: [8, 8, 8, 8],
+                            ident: 0x1234,
+                            seq: 1,
+                        },
+                    })
+                    .await;
+                send_ping = false;
+            }
+            let _ = tokio::select! {
+                r = read.recv() => {
+                    if let Some((data, addr)) = r {
+                        println!("ICMP response received!");
+                        parse_and_print_icmp_noip(&data, addr);
+                    }
+                }
+                _ =  time::sleep(Duration::from_millis(2000)) => {
+                    send_ping = true;
+                }
 
-        let _ = control_sender
-            .send(ProxyMessage::Write {
-                handle,
-                data: b"hello google".to_vec(),
-                dst: Some([8, 8, 8, 8]),
-                resp: s2,
-                socket_type: SocketType::ICMP,
-                send_at: Instant::from_millis(0),
-            })
-            .await;
-
-        if r2.await.unwrap() {
-            println!("ICMP PACKET SENT");
+            };
         }
     }
 
