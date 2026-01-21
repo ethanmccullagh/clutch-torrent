@@ -17,12 +17,11 @@ pub enum WriteMessage {
         ident: u16,
         seq: u16,
     },
-    TCP {},
-    UDP {},
-    RAW {
-        data: Vec<u8>,
-        resp: oneshot::Sender<bool>,
+    TCP {
+        handle: SocketHandle,
+        data: Bytes,
     },
+    UDP {},
 }
 
 pub enum ConnectMessage {
@@ -32,9 +31,10 @@ pub enum ConnectMessage {
     },
     TCP {
         addr: [u8; 4],
-        port: i32,
+        port: u16,
         connect: bool,
         resp: oneshot::Sender<Option<SocketHandle>>,
+        read: mpsc::Sender<SocketReadChannel>,
     },
 }
 

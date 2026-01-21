@@ -1,24 +1,21 @@
 use anyhow::Result;
 use boringtun::noise::{Tunn, TunnResult};
 use core::net::SocketAddr;
+use pretty_hex::*;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use pretty_hex::*;
 
+use crate::helper::parse_and_print_tcp;
 
 pub async fn spawn_boring_threads(
     tunn: Tunn,
     endpoint: SocketAddr,
     vpn_receiver: mpsc::Receiver<Vec<u8>>,
-    device_sender: mpsc::Sender<Vec<u8>>
-) -> Result<
-    Vec<JoinHandle<()>>,
-> {
+    device_sender: mpsc::Sender<Vec<u8>>,
+) -> Result<Vec<JoinHandle<()>>> {
     let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
-
-    let mut task_handles = Vec::new();
 
     let tunn1 = Arc::new(Mutex::new(tunn));
     let tunn2 = tunn1.clone();
@@ -26,9 +23,20 @@ pub async fn spawn_boring_threads(
     let socket_r = Arc::new(udp_socket);
     let socket_s = socket_r.clone();
 
-    let th1 = tokio::spawn(udp_recv_task(socket_r, device_sender, endpoint.clone(), tunn1));
-    let th2 = tokio::spawn(udp_transmit_task(socket_s, vpn_receiver, endpoint, tunn2));
+    let th1 = tokio::spawn(udp_recv_task(
+        socket_r,
+        device_sender,
+        endpoint.clone(),
+        tunn1,
+    ));
+    let th2 = tokio::spawn(udp_transmit_task(
+        socket_s,
+        vpn_receiver,
+        endpoint.clone(),
+        tunn2,
+    ));
 
+    let mut task_handles = Vec::new();
     task_handles.push(th1);
     task_handles.push(th2);
     Ok(task_handles)
@@ -64,17 +72,17 @@ async fn udp_recv_task(
                     TunnResult::WriteToNetwork(b) => {
                         //print_packet(b);
                         let _ = socket.send_to(b, addr).await;
-                        
+
                         //println!("-->Boring RECEIVE: packet sent to network");
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);
                     }
                     TunnResult::WriteToTunnelV4(b, _) => {
                         //parse_and_print_icmp(b);
-                        //println!("{:?}", b.hex_dump());
-                        
+
                         //Drop Proton MTU Probe
-                        if b.len() > 20 && b.windows(16).any(|w| w == b"Proton VPN MTU P") {
-                            break;
+                        if b.len() > 20 && !b.windows(16).any(|w| w == b"Proton VPN MTU P") {
+                            println!("Boring Tunn Recv-----------");
+                            parse_and_print_tcp(&b);
                         }
                         let _ = sender.send(b.to_vec()).await;
                         //println!("-->BORING RECEIVE: packet sent to channel");
@@ -116,7 +124,6 @@ async fn udp_transmit_task(
             }
 
             drop(tunn);
-            
         }
     }
 }

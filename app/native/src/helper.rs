@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose, Engine as _};
-use etherparse::PacketBuilder;
-use etherparse::{Icmpv4Header, Ipv4HeaderSlice};
+use etherparse::{Icmpv4Header, Ipv4Header, Ipv4HeaderSlice};
+use etherparse::{PacketBuilder, TcpHeader};
+use pretty_hex::PrettyHex;
 use smoltcp::wire::IpAddress;
 
 // Helper: Decode Base64 WireGuard keys to 32-byte arrays
@@ -34,6 +35,22 @@ pub fn parse_and_print_icmp_noip(packet: &[u8], addr: IpAddress) -> bool {
         }
     }
     return false;
+}
+
+pub fn parse_and_print_tcp(packet: &[u8]) {
+    if let Ok((ip_header, ip_body)) = Ipv4Header::from_slice(packet) {
+        println!("   IP Header: {:?}", ip_header);
+        if let Ok((tcp_header, body)) = TcpHeader::from_slice(ip_body) {
+            println!("   TCP Header: {:?}", tcp_header);
+            let non_zero: Vec<u8> = body.iter().filter(|x| **x > 0).copied().collect();
+            println!("   TCP Body: {:#?}", non_zero.hex_dump());
+        }
+    } else {
+        if let Ok((tcp_header, body)) = TcpHeader::from_slice(packet) {
+            println!("   TCP Header: {:?}", tcp_header);
+            println!("   TCP Body: {:#?}", body.hex_dump());
+        }
+    }
 }
 
 pub fn parse_and_print_icmp(packet: &[u8]) -> bool {

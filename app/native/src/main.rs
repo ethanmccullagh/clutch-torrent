@@ -27,9 +27,9 @@ async fn main() {
     let conf = Ini::load_from_file("/home/ethanm/Downloads/cachy3-CA-1208.conf").unwrap();
 
     //Communication channels for sync engine <--> async tasks
-    let (vpn_sender, mut vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
-    let (local_sender, local_receiver) = mpsc::channel::<Vec<u8>>(100);
-    let (device_sender, mut device_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (vpn_sender, vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (local_sender, _local_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (device_sender, device_receiver) = mpsc::channel::<Vec<u8>>(100);
     let (control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
 
     //setup and start vpn tunnel tasks
@@ -41,7 +41,11 @@ async fn main() {
     //ping_test(&vpn_sender, &mut device_receiver);
     //let _join_handle = tokio::spawn (gateway_test(control_sender, device_sender, local_receiver));
 
-    tokio::spawn(socket_test(control_sender));
+    tokio::spawn(async move {
+        socket_test(control_sender.clone()).await;
+        tcp_socket_test(control_sender).await;
+        println!("TESTS COMPLETED!!!!!");
+    });
 
     run_engine(
         conf,

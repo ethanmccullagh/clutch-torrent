@@ -6,10 +6,7 @@ use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::schema::{ProxyMessage, WriteMessage};
 
-async fn run_socks5_server(
-    listener: TcpListener,
-    control_sender: mpsc::Sender<ProxyMessage>,
-) {
+async fn run_socks5_server(listener: TcpListener, control_sender: mpsc::Sender<ProxyMessage>) {
     loop {
         if let Ok((mut stream, _)) = listener.accept().await {
             let control_clone = control_sender.clone();
@@ -54,17 +51,21 @@ async fn bridge_socks_to_smoltcp(
 
             // Push into smoltcp buffer
             let (s, r) = oneshot::channel::<bool>();
-            let _ = control_sender.send(ProxyMessage::Write {
-                msg: WriteMessage::TCP {},
-            }).await;
+            let _ = control_sender
+                .send(ProxyMessage::Write {
+                    msg: WriteMessage::UDP {},
+                })
+                .await;
             // "Interrupt" the engine to send the packet
         }
 
         // READ from smoltcp -> WRITE to SOCKS5
         // Using poll_fn lets us sleep until smoltcp actually has data
         let (s, r) = oneshot::channel::<bool>();
-        let _ = control_sender.send(ProxyMessage::Write {
-            msg: WriteMessage::TCP {},
-        }).await;
+        let _ = control_sender
+            .send(ProxyMessage::Write {
+                msg: WriteMessage::UDP {},
+            })
+            .await;
     }
 }

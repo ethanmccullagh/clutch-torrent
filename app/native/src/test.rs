@@ -1,5 +1,8 @@
 use crate::helper::*;
 use crate::schema::{ConnectMessage, ProxyMessage, SocketReadChannel, WriteMessage};
+use bytes::Bytes;
+use pretty_hex::*;
+use smoltcp::iface::SocketHandle;
 use smoltcp::wire::IpAddress;
 use std::thread::sleep;
 use std::time::Duration;
@@ -86,7 +89,7 @@ pub async fn socket_test(control_sender: mpsc::Sender<ProxyMessage>) {
                 r = read.recv() => {
                     if let Some((data, addr)) = r {
                         println!("ICMP response received!");
-                        parse_and_print_icmp_noip(&data, addr);
+                        if parse_and_print_icmp_noip(&data, addr) {break}
                     }
                 }
                 _ =  time::sleep(Duration::from_millis(2000)) => {
@@ -100,6 +103,59 @@ pub async fn socket_test(control_sender: mpsc::Sender<ProxyMessage>) {
     //start sending test packets to socket
 
     //await reponse on socket
+}
+
+//Establish tcp socket with remote test server
+pub async fn tcp_socket_test(control_sender: mpsc::Sender<ProxyMessage>) {
+    println!("---Starting TCP socket test");
+
+    //send tcp connect request
+    let (s, r) = oneshot::channel::<Option<SocketHandle>>();
+    let (send, mut read) = mpsc::channel::<SocketReadChannel>(10);
+
+    control_sender
+        .send(ProxyMessage::Connect {
+            msg: ConnectMessage::TCP {
+                addr: [45, 79, 112, 203],
+                port: 4242,
+                connect: true,
+                resp: s,
+                read: send,
+            },
+        })
+        .await
+        .unwrap();
+
+    if let Some(handle) = r.await.unwrap() {
+        println!("TCP socket created: {}", handle);
+        let mut send_ping = true;
+        loop {
+            if send_ping {
+                let _ = control_sender
+                    .send(ProxyMessage::Write {
+                        msg: WriteMessage::TCP {
+                            handle,
+                            data: Bytes::copy_from_slice(b"Hello TCP\n"),
+                        },
+                    })
+                    .await;
+                send_ping = false;
+            }
+            let _ = tokio::select! {
+                r = read.recv() => {
+                    if let Some((data, addr)) = r {
+                        println!("TCP response received!");
+                        println!("{:#?}", data.hex_dump());
+                        break
+                    }
+                }
+                _ =  time::sleep(Duration::from_millis(5000)) => {
+                    send_ping = true;
+                }
+
+            };
+        }
+    }
 }
 
 //Test SOCKS5 proxy by connecting through it
