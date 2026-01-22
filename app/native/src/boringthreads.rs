@@ -1,7 +1,6 @@
 use anyhow::Result;
 use boringtun::noise::{Tunn, TunnResult};
 use core::net::SocketAddr;
-use pretty_hex::*;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
@@ -80,10 +79,11 @@ async fn udp_recv_task(
                         //parse_and_print_icmp(b);
 
                         //Drop Proton MTU Probe
-                        if b.len() > 20 && !b.windows(16).any(|w| w == b"Proton VPN MTU P") {
-                            println!("Boring Tunn Recv-----------");
-                            parse_and_print_tcp(&b);
-                        }
+                        // if b.len() > 20 && !b.windows(16).any(|w| w == b"Proton VPN MTU P") {
+                        //     println!("Boring Tunn Recv-----------");
+                        //     parse_and_print_tcp(&b);
+                        // }
+
                         let _ = sender.send(b.to_vec()).await;
                         //println!("-->BORING RECEIVE: packet sent to channel");
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);

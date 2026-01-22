@@ -26,12 +26,20 @@ pub fn run_engine(
         setup_engine::<'_>(conf, device_receiver, vpn_sender, local_sender);
 
     let mut connection_map = HashMap::<SocketHandle, mpsc::Sender<SocketReadChannel>>::new();
+    let mut pruned_sockets = Vec::<SocketHandle>::new();
+    let mut cycles = 0;
 
     loop {
-        let poll_result = iface.poll(Instant::now(), &mut device, &mut socket_set);
+        //Remove Pruned handles from socket set and connection map
+        pruned_sockets.iter().for_each(|handle| {
+            socket_set.remove(*handle);
+            connection_map.remove(handle);
+        });
+        pruned_sockets.clear();
 
-        if poll_result {
-            poll_sockets(&mut socket_set, &mut connection_map)
+        //Poll Sockets
+        if iface.poll(Instant::now(), &mut device, &mut socket_set) {
+            poll_sockets(&mut socket_set, &mut connection_map, &mut pruned_sockets);
         }
 
         //Poll contrl receiver for Connect/Write/Close messages
@@ -53,12 +61,13 @@ pub fn run_engine(
             }
         }
 
+        cycles += 1;
+        //Sleep if there is a poll delay
         if let Some(delay) = iface.poll_delay(Instant::now(), &socket_set) {
-            // println!("Engine Poll Delay: {:?}", delay.micros());
-            // sleep(delay.into());
-        } else {
-            // sleep(Duration::from_millis(1));
-            // println!("No delay");
+            println!("Engine Poll Delay: {:?}", delay.micros());
+            println!("Engine Cycles: {:?}", cycles);
+
+            sleep(delay.into());
         }
     }
 }
@@ -66,72 +75,53 @@ pub fn run_engine(
 fn poll_sockets(
     socket_set: &mut SocketSet,
     connection_map: &mut HashMap<SocketHandle, mpsc::Sender<SocketReadChannel>>,
+    pruned_sockets: &mut Vec<SocketHandle>,
 ) {
-    let mut pruned_handles = Vec::<SocketHandle>::new();
-
     for (handle, socket) in socket_set.iter_mut() {
         let mut rx_buffer = [0u8; TCP_BUFFER_SIZE];
         match socket {
             Socket::Icmp(sock) => {
-                if sock.can_recv() {
-                    println!("ICMP socket has data");
-                    if let Some(sender) = connection_map.get(&handle) {
-                        while let Ok((data, addr)) = sock.recv() {
-                            match sender.try_send((Bytes::copy_from_slice(data), addr)) {
-                                Ok(_) => {}
-                                Err(_) => break,
-                            }
+                if let Some(sender) = connection_map.get(&handle) {
+                    if sender.is_closed() {
+                        println!("ICMP Socket {} dead read channel, pruning...", handle);
+                        pruned_sockets.push(handle);
+                        continue;
+                    }
+
+                    while let Ok((data, addr)) = sock.recv() {
+                        match sender.try_send((Bytes::copy_from_slice(data), addr)) {
+                            Ok(_) => {}
+                            Err(_) => break,
                         }
-                    } else {
-                        println!("Sender not found in Connection Map");
                     }
                 }
             }
             Socket::Tcp(sock) => {
-                println!("testing tcp sock read {}", handle);
-                if sock.may_recv() {
-                    println!("May recv TCP");
-                }
-                if sock.can_recv() {
-                    println!("TCP socket has data");
-                    if let Some(sender) = connection_map.get(&handle) {
-                        if sender.is_closed() {
-                            println!("TCP Socket {} dead read channel, pruning...", handle);
-                            pruned_handles.push(handle);
-                            continue;
-                        }
-                        while sock.can_recv() {
-                            if let Ok(len) = sock.peek_slice(&mut rx_buffer) {
-                                match sender.try_send((
-                                    Bytes::copy_from_slice(&rx_buffer[..len]),
-                                    IpAddress::v4(0, 0, 0, 0),
-                                )) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        println!("TCP Read Channel Error: {}", e);
-                                        break;
-                                    }
+                if let Some(sender) = connection_map.get(&handle) {
+                    if sender.is_closed() {
+                        println!("TCP Socket {} dead read channel, pruning...", handle);
+                        pruned_sockets.push(handle);
+                        continue;
+                    }
+
+                    while sock.can_recv() {
+                        if let Ok(len) = sock.recv_slice(&mut rx_buffer) {
+                            match sender.try_send((
+                                Bytes::copy_from_slice(&rx_buffer[..len]),
+                                IpAddress::v4(0, 0, 0, 0),
+                            )) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    println!("TCP Read Channel Error: {}", e);
+                                    break;
                                 }
                             }
                         }
-                    } else {
-                        println!("Sender not found in Connection Map");
                     }
                 }
             }
             _ => {}
         }
-    }
-
-    //Remove Pruned handles from socket set and connection map
-    for handle in pruned_handles {
-        socket_set.remove(handle);
-        connection_map.remove(&handle);
-
-        //test prints
-        // println!("Removed pruned handle:");
-        // println!("Socket Set len {}", socket_set.iter().count());
-        // println!("Connection map len {}", connection_map.len());
     }
 }
 
@@ -165,7 +155,7 @@ fn create_socket(
                 ) {
                     Ok(()) => {}
                     Err(e) => {
-                        println!("{}", e);
+                        println!("smoltcp TCP connect error: {}", e);
                         let _ = resp.send(None);
                         return;
                     }
@@ -174,7 +164,7 @@ fn create_socket(
                 match socket.listen((IpAddress::v4(10, 2, 0, 2), get_ephemeral_port())) {
                     Ok(()) => {}
                     Err(e) => {
-                        println!("{}", e);
+                        println!("smoltcp TCP listen error: {}", e);
                         let _ = resp.send(None);
                         return;
                     }
