@@ -15,14 +15,12 @@ pub fn setup_engine<'a>(
     conf: Ini,
     device_receiver: mpsc::Receiver<Vec<u8>>,
     vpn_sender: mpsc::Sender<Vec<u8>>,
-    local_sender: mpsc::Sender<Vec<u8>>,
 ) -> (Interface, Tracer<MyVirtualDevice>, SocketSet<'a>) {
     let config = Config::new(HardwareAddress::Ip);
 
     let device = MyVirtualDevice {
         rx_queue: device_receiver,
         vpn_tx: vpn_sender,
-        local_tx: local_sender,
     };
 
     let mut tracer = Tracer::new(device, |_device, printer| {

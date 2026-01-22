@@ -19,15 +19,15 @@ pub fn run_engine(
     conf: Ini,
     device_receiver: mpsc::Receiver<Vec<u8>>,
     vpn_sender: mpsc::Sender<Vec<u8>>,
-    local_sender: mpsc::Sender<Vec<u8>>,
     mut control_receiver: mpsc::Receiver<ProxyMessage>,
 ) {
     let (mut iface, mut device, mut socket_set) =
-        setup_engine::<'_>(conf, device_receiver, vpn_sender, local_sender);
+        setup_engine::<'_>(conf, device_receiver, vpn_sender);
 
     let mut connection_map = HashMap::<SocketHandle, mpsc::Sender<SocketReadChannel>>::new();
     let mut pruned_sockets = Vec::<SocketHandle>::new();
     let mut cycles = 0;
+    let mut dead_cycles = 0;
 
     loop {
         //Remove Pruned handles from socket set and connection map
@@ -40,6 +40,7 @@ pub fn run_engine(
         //Poll Sockets
         if iface.poll(Instant::now(), &mut device, &mut socket_set) {
             poll_sockets(&mut socket_set, &mut connection_map, &mut pruned_sockets);
+            dead_cycles = 0;
         }
 
         //Poll contrl receiver for Connect/Write/Close messages
@@ -50,10 +51,6 @@ pub fn run_engine(
                     println!("Connect");
                     create_socket(msg, &mut socket_set, &mut connection_map, iface.context());
                 }
-                ProxyMessage::Close { handle, resp } => {
-                    let _ = socket_set.remove(handle);
-                    let _ = resp.send(true);
-                }
                 ProxyMessage::Write { msg } => {
                     println!("Write");
                     write_to_socket(msg, &mut socket_set, device.capabilities().clone());
@@ -62,12 +59,18 @@ pub fn run_engine(
         }
 
         cycles += 1;
+        dead_cycles += 1;
         //Sleep if there is a poll delay
         if let Some(delay) = iface.poll_delay(Instant::now(), &socket_set) {
             println!("Engine Poll Delay: {:?}", delay.micros());
             println!("Engine Cycles: {:?}", cycles);
 
             sleep(delay.into());
+        } else if dead_cycles > 10 {
+            sleep(Duration::from_millis(100));
+        }
+        if cycles % 1000 == 0 {
+            println!("Engine Cycles: {:?}", cycles);
         }
     }
 }
@@ -101,6 +104,7 @@ fn poll_sockets(
                     if sender.is_closed() {
                         println!("TCP Socket {} dead read channel, pruning...", handle);
                         pruned_sockets.push(handle);
+                        sock.close();
                         continue;
                     }
 

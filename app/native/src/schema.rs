@@ -2,11 +2,9 @@ use bytes::Bytes;
 use smoltcp::iface::SocketHandle;
 use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
-use smoltcp::wire::{IpAddress, Ipv4Address, Ipv4Packet};
+use smoltcp::wire::IpAddress;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
-
-const LOCAL_IP: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
 
 pub type SocketReadChannel = (Bytes, IpAddress);
 
@@ -39,16 +37,8 @@ pub enum ConnectMessage {
 }
 
 pub enum ProxyMessage {
-    Connect {
-        msg: ConnectMessage,
-    },
-    Close {
-        handle: SocketHandle,
-        resp: oneshot::Sender<bool>,
-    },
-    Write {
-        msg: WriteMessage,
-    },
+    Connect { msg: ConnectMessage },
+    Write { msg: WriteMessage },
 }
 
 pub struct ChannelMessage {
@@ -59,7 +49,6 @@ pub struct ChannelMessage {
 pub struct MyVirtualDevice {
     pub rx_queue: mpsc::Receiver<Vec<u8>>,
     pub vpn_tx: mpsc::Sender<Vec<u8>>,
-    pub local_tx: mpsc::Sender<Vec<u8>>,
 }
 
 impl Device for MyVirtualDevice {
@@ -79,7 +68,6 @@ impl Device for MyVirtualDevice {
                 ChannelRxToken { buffer },
                 ChannelTxToken {
                     vpn_tx: &self.vpn_tx,
-                    local_tx: &self.local_tx,
                 },
             )),
             Err(_) => None,
@@ -89,13 +77,12 @@ impl Device for MyVirtualDevice {
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
         Some(ChannelTxToken {
             vpn_tx: &self.vpn_tx,
-            local_tx: &self.local_tx,
         })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps: DeviceCapabilities = DeviceCapabilities::default();
-        caps.max_transmission_unit = 1280;
+        caps.max_transmission_unit = 1500;
         caps.medium = Medium::Ip; // We work at the IP layer, not Ethernet
         caps.checksum.icmpv4 = Checksum::Tx;
         caps
@@ -119,7 +106,6 @@ impl RxToken for ChannelRxToken {
 
 pub struct ChannelTxToken<'a> {
     vpn_tx: &'a mpsc::Sender<Vec<u8>>,
-    local_tx: &'a mpsc::Sender<Vec<u8>>,
 }
 impl<'a> TxToken for ChannelTxToken<'a> {
     fn consume<R, F>(self, len: usize, f: F) -> R
@@ -130,18 +116,8 @@ impl<'a> TxToken for ChannelTxToken<'a> {
         let mut buffer: Vec<u8> = vec![0u8; len];
         let result: R = f(&mut buffer);
 
-        if let Ok(packet) = Ipv4Packet::new_checked(&buffer) {
-            let dst = packet.dst_addr();
-
-            if dst.is_loopback() || dst == LOCAL_IP {
-                if let Err(e) = self.local_tx.try_send(buffer) {
-                    eprintln!("ENGINE LOCAL TX CHANNEL FULL {}", e);
-                }
-            } else {
-                if let Err(e) = self.vpn_tx.try_send(buffer) {
-                    eprintln!("ENGINE VPN TX CHANNEL FULL {}", e);
-                }
-            }
+        if let Err(e) = self.vpn_tx.try_send(buffer) {
+            eprintln!("ENGINE VPN TX CHANNEL ERROR {}", e);
         }
 
         result

@@ -1,6 +1,4 @@
 use ini::Ini;
-use smoltcp::time::Instant;
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
@@ -28,7 +26,6 @@ async fn main() {
 
     //Communication channels for sync engine <--> async tasks
     let (vpn_sender, vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
-    let (local_sender, _local_receiver) = mpsc::channel::<Vec<u8>>(100);
     let (device_sender, device_receiver) = mpsc::channel::<Vec<u8>>(100);
     let (control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
 
@@ -47,11 +44,5 @@ async fn main() {
         println!("TESTS COMPLETED!!!!!");
     });
 
-    run_engine(
-        conf,
-        device_receiver,
-        vpn_sender,
-        local_sender,
-        control_receiver,
-    );
+    run_engine(conf, device_receiver, vpn_sender, control_receiver);
 }
