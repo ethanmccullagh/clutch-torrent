@@ -3,7 +3,6 @@ use crate::schema::{ConnectMessage, ProxyMessage, SocketReadChannel, WriteMessag
 use bytes::Bytes;
 use pretty_hex::*;
 use smoltcp::iface::SocketHandle;
-use smoltcp::wire::IpAddress;
 use std::thread::sleep;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -143,13 +142,13 @@ pub async fn tcp_socket_test(control_sender: mpsc::Sender<ProxyMessage>) {
             }
             let _ = tokio::select! {
                 r = read.recv() => {
-                    if let Some((data, addr)) = r {
+                    if let Some((data, _addr)) = r {
                         println!("TCP response received!");
                         println!("{:#?}", data.hex_dump());
                         break
                     }
                 }
-                _ =  time::sleep(Duration::from_millis(5000)) => {
+                _ =  time::sleep(Duration::from_millis(2000)) => {
                     send_ping = true;
                 }
 

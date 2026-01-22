@@ -7,7 +7,7 @@ use smoltcp::iface::{Context, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities};
 use smoltcp::socket::{icmp, tcp, Socket};
 use smoltcp::time::Instant;
-use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress, TcpPacket, TcpRepr};
+use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress};
 use std::collections::HashMap;
 use std::thread::sleep;
 use std::time::Duration;

@@ -1,8 +1,7 @@
 use smoltcp::wire::Ipv4Address;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::schema::{ProxyMessage, WriteMessage};
 

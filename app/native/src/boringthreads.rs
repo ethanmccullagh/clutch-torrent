@@ -6,8 +6,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
-use crate::helper::parse_and_print_tcp;
-
 pub async fn spawn_boring_threads(
     tunn: Tunn,
     endpoint: SocketAddr,
