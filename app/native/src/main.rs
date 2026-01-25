@@ -39,8 +39,10 @@ async fn main() {
 
     tokio::spawn(async move {
         socket_test(control_sender.clone()).await;
-        tcp_socket_test(control_sender).await;
+        tcp_socket_test(control_sender.clone()).await;
+
         println!("TESTS COMPLETED!!!!!");
+        let _ = control_sender.send(ProxyMessage::Close).await;
     });
 
     run_engine(conf, device_receiver, vpn_sender, control_receiver);

@@ -45,7 +45,7 @@ pub fn run_engine(
 
         //Poll contrl receiver for Connect/Write/Close messages
         if let Ok(msg) = control_receiver.try_recv() {
-            print!("Engine control packet received: ");
+            print!("Engine control message received: ");
             match msg {
                 ProxyMessage::Connect { msg } => {
                     println!("Connect");
@@ -54,6 +54,10 @@ pub fn run_engine(
                 ProxyMessage::Write { msg } => {
                     println!("Write");
                     write_to_socket(msg, &mut socket_set, device.capabilities().clone());
+                }
+                ProxyMessage::Close => {
+                    println!("Engine Shutdown -- Terminating process");
+                    break;
                 }
             }
         }

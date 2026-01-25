@@ -39,6 +39,7 @@ pub enum ConnectMessage {
 pub enum ProxyMessage {
     Connect { msg: ConnectMessage },
     Write { msg: WriteMessage },
+    Close,
 }
 
 pub struct ChannelMessage {
