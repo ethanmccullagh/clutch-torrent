@@ -7,7 +7,6 @@ pub mod engine;
 pub mod helper;
 pub mod schema;
 pub mod setup;
-pub mod socks5;
 pub mod test;
 
 //mod test;
@@ -40,6 +39,7 @@ async fn main() {
     tokio::spawn(async move {
         socket_test(control_sender.clone()).await;
         tcp_socket_test(control_sender.clone()).await;
+        udp_socket_test(control_sender.clone()).await;
 
         println!("TESTS COMPLETED!!!!!");
         let _ = control_sender.send(ProxyMessage::Close).await;

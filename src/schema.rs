@@ -2,7 +2,7 @@ use bytes::Bytes;
 use smoltcp::iface::SocketHandle;
 use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
-use smoltcp::wire::IpAddress;
+use smoltcp::wire::{IpAddress, IpEndpoint};
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 
@@ -19,7 +19,16 @@ pub enum WriteMessage {
         handle: SocketHandle,
         data: Bytes,
     },
-    UDP {},
+    UDP {
+        handle: SocketHandle,
+        data: Bytes,
+        dst: [u8; 4],
+        dst_port: u16,
+    },
+    NAT {
+        handle: SocketHandle,
+        opcode: u8,
+    },
 }
 
 pub enum ConnectMessage {
@@ -28,9 +37,14 @@ pub enum ConnectMessage {
         read: mpsc::Sender<SocketReadChannel>,
     },
     TCP {
-        addr: [u8; 4],
-        port: u16,
+        remote: IpEndpoint,
+        local_port: u16,
         connect: bool,
+        resp: oneshot::Sender<Option<SocketHandle>>,
+        read: mpsc::Sender<SocketReadChannel>,
+    },
+    UDP {
+        local_port: u16,
         resp: oneshot::Sender<Option<SocketHandle>>,
         read: mpsc::Sender<SocketReadChannel>,
     },

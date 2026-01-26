@@ -5,15 +5,16 @@ use ini::Ini;
 use rand;
 use smoltcp::iface::{Context, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities};
-use smoltcp::socket::{icmp, tcp, Socket};
+use smoltcp::socket::{icmp, tcp, udp, Socket};
 use smoltcp::time::Instant;
-use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress};
+use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress, IpEndpoint, IpListenEndpoint};
 use std::collections::HashMap;
 use std::thread::sleep;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 const TCP_BUFFER_SIZE: usize = 256;
+const UDP_BUFFER_SIZE: usize = 256;
 
 pub fn run_engine(
     conf: Ini,
@@ -45,18 +46,18 @@ pub fn run_engine(
 
         //Poll contrl receiver for Connect/Write/Close messages
         if let Ok(msg) = control_receiver.try_recv() {
-            print!("Engine control message received: ");
+            eprint!("Engine control message received: ");
             match msg {
                 ProxyMessage::Connect { msg } => {
-                    println!("Connect");
+                    eprintln!("Connect");
                     create_socket(msg, &mut socket_set, &mut connection_map, iface.context());
                 }
                 ProxyMessage::Write { msg } => {
-                    println!("Write");
+                    eprintln!("Write");
                     write_to_socket(msg, &mut socket_set, device.capabilities().clone());
                 }
                 ProxyMessage::Close => {
-                    println!("Engine Shutdown -- Terminating process");
+                    eprintln!("Engine Shutdown -- Terminating process");
                     break;
                 }
             }
@@ -66,15 +67,15 @@ pub fn run_engine(
         dead_cycles += 1;
         //Sleep if there is a poll delay
         if let Some(delay) = iface.poll_delay(Instant::now(), &socket_set) {
-            println!("Engine Poll Delay: {:?}", delay.micros());
-            println!("Engine Cycles: {:?}", cycles);
+            eprintln!("Engine Poll Delay: {:?}", delay.micros());
+            eprintln!("Engine Cycles: {:?}", cycles);
 
             sleep(delay.into());
         } else if dead_cycles > 10 {
             sleep(Duration::from_millis(100));
         }
         if cycles % 1000 == 0 {
-            println!("Engine Cycles: {:?}", cycles);
+            eprintln!("Engine Cycles: {:?}", cycles);
         }
     }
 }
@@ -90,7 +91,7 @@ fn poll_sockets(
             Socket::Icmp(sock) => {
                 if let Some(sender) = connection_map.get(&handle) {
                     if sender.is_closed() {
-                        println!("ICMP Socket {} dead read channel, pruning...", handle);
+                        eprintln!("ICMP Socket {} dead read channel, pruning...", handle);
                         pruned_sockets.push(handle);
                         continue;
                     }
@@ -106,7 +107,7 @@ fn poll_sockets(
             Socket::Tcp(sock) => {
                 if let Some(sender) = connection_map.get(&handle) {
                     if sender.is_closed() {
-                        println!("TCP Socket {} dead read channel, pruning...", handle);
+                        eprintln!("TCP Socket {} dead read channel, pruning...", handle);
                         pruned_sockets.push(handle);
                         sock.close();
                         continue;
@@ -120,7 +121,32 @@ fn poll_sockets(
                             )) {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    println!("TCP Read Channel Error: {}", e);
+                                    eprintln!("TCP Read Channel Error: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Socket::Udp(sock) => {
+                if let Some(sender) = connection_map.get(&handle) {
+                    if sender.is_closed() {
+                        eprintln!("UDP Socket {} dead read channel, pruning...", handle);
+                        pruned_sockets.push(handle);
+                        sock.close();
+                        continue;
+                    }
+
+                    while sock.can_recv() {
+                        if let Ok((len, meta_data)) = sock.recv_slice(&mut rx_buffer) {
+                            match sender.try_send((
+                                Bytes::copy_from_slice(&rx_buffer[..len]),
+                                meta_data.endpoint.addr,
+                            )) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    eprintln!("TCP Read Channel Error: {}", e);
                                     break;
                                 }
                             }
@@ -144,9 +170,42 @@ fn create_socket(
     context: &mut Context,
 ) {
     match msg {
+        ConnectMessage::UDP {
+            local_port,
+            resp,
+            read,
+        } => {
+            let rx_buffer =
+                udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; UDP_BUFFER_SIZE]);
+            let tx_buffer =
+                udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; UDP_BUFFER_SIZE]);
+            let mut socket = udp::Socket::new(rx_buffer, tx_buffer);
+
+            let mut port = local_port;
+            if port == 0 {
+                port = get_ephemeral_port();
+            }
+
+            match socket.bind(IpListenEndpoint {
+                addr: Some(IpAddress::v4(10, 2, 0, 2)),
+                port: port,
+            }) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("smoltcp UDP bind error: {}", e);
+                    let _ = resp.send(None);
+                    return;
+                }
+            }
+
+            let handle = socket_set.add(socket);
+            connection_map.insert(handle, read);
+
+            let _ = resp.send(Some(handle));
+        }
         ConnectMessage::TCP {
-            addr,
-            port,
+            remote,
+            local_port,
             connect,
             resp,
             read,
@@ -155,24 +214,25 @@ fn create_socket(
             let tx_buffer = tcp::SocketBuffer::new(vec![0; TCP_BUFFER_SIZE]);
             let mut socket = tcp::Socket::new(rx_buffer, tx_buffer);
 
+            let mut port = local_port;
+            if port == 0 {
+                port = get_ephemeral_port();
+            }
+
             if connect {
-                match socket.connect(
-                    context,
-                    (IpAddress::v4(addr[0], addr[1], addr[2], addr[3]), port),
-                    get_ephemeral_port(),
-                ) {
+                match socket.connect(context, remote, port) {
                     Ok(()) => {}
                     Err(e) => {
-                        println!("smoltcp TCP connect error: {}", e);
+                        eprintln!("smoltcp TCP connect error: {}", e);
                         let _ = resp.send(None);
                         return;
                     }
                 }
             } else {
-                match socket.listen((IpAddress::v4(10, 2, 0, 2), get_ephemeral_port())) {
+                match socket.listen(port) {
                     Ok(()) => {}
                     Err(e) => {
-                        println!("smoltcp TCP listen error: {}", e);
+                        eprintln!("smoltcp TCP listen error: {}", e);
                         let _ = resp.send(None);
                         return;
                     }
@@ -202,6 +262,34 @@ fn create_socket(
 
 fn write_to_socket(msg: WriteMessage, socket_set: &mut SocketSet, device_caps: DeviceCapabilities) {
     match msg {
+        WriteMessage::UDP {
+            handle,
+            data,
+            dst,
+            dst_port,
+        } => {
+            let socket = socket_set.get_mut::<udp::Socket>(handle);
+            let remote_endpoint =
+                IpEndpoint::new(IpAddress::v4(dst[0], dst[1], dst[2], dst[3]), dst_port);
+
+            match socket.send_slice(&data, remote_endpoint) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("UDP socket {} send error", handle);
+                    eprintln!("{}", e)
+                }
+            }
+        }
+        WriteMessage::TCP { handle, data } => {
+            let socket = socket_set.get_mut::<tcp::Socket>(handle);
+
+            if !socket.can_send() {
+                eprintln!("Tried to write to closed socket");
+                return;
+            }
+            let data_slice = data.iter().as_slice();
+            let _ = socket.send_slice(data_slice);
+        }
         WriteMessage::ICMP {
             handle,
             dst,
@@ -226,19 +314,23 @@ fn write_to_socket(msg: WriteMessage, socket_set: &mut SocketSet, device_caps: D
 
             repr.emit(&mut icmp_packet, &device_caps.checksum);
         }
-        WriteMessage::TCP { handle, data } => {
-            let socket = socket_set.get_mut::<tcp::Socket>(handle);
+        WriteMessage::NAT { handle, opcode } => {
+            let socket = socket_set.get_mut::<udp::Socket>(handle);
+            let remote_endpoint = IpEndpoint::new(IpAddress::v4(10, 2, 0, 1), 5351);
+            let port: [u8; 2] = socket.endpoint().port.to_be_bytes();
 
-            if !socket.can_send() {
-                println!("Tried to write to closed socket");
-                return;
+            let data = [
+                //V  Op      Reserved  IntPort           ExtPort   Lifetime
+                0x0, opcode, 0x0, 0x0, port[0], port[1], 0x0, 0x0, 0x0, 0x0, 0x0E, 0x10,
+            ];
+
+            match socket.send_slice(&data, remote_endpoint) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("UDP socket {} send error", handle);
+                    eprintln!("{}", e)
+                }
             }
-            let data_slice = data.iter().as_slice();
-            println!("");
-            println!("");
-            println!("WRITING TCP DATA TO SOCKET: len {}", data_slice.len());
-            let _ = socket.send_slice(data_slice);
         }
-        _ => {}
     }
 }

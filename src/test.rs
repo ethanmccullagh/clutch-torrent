@@ -3,6 +3,7 @@ use crate::schema::{ConnectMessage, ProxyMessage, SocketReadChannel, WriteMessag
 use bytes::Bytes;
 use pretty_hex::*;
 use smoltcp::iface::SocketHandle;
+use smoltcp::wire::{IpAddress, IpEndpoint};
 use std::thread::sleep;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -115,8 +116,8 @@ pub async fn tcp_socket_test(control_sender: mpsc::Sender<ProxyMessage>) {
     control_sender
         .send(ProxyMessage::Connect {
             msg: ConnectMessage::TCP {
-                addr: [45, 79, 112, 203],
-                port: 4242,
+                remote: IpEndpoint::new(IpAddress::v4(45, 79, 112, 203), 4242),
+                local_port: 0,
                 connect: true,
                 resp: s,
                 read: send,
@@ -145,7 +146,80 @@ pub async fn tcp_socket_test(control_sender: mpsc::Sender<ProxyMessage>) {
                     if let Some((data, _addr)) = r {
                         println!("TCP response received!");
                         println!("{:#?}", data.hex_dump());
-                        break
+                        if &b"Hello TCP\n"[..] == data {
+                            println!("TCP Test Passed !");
+                            break;
+                        }
+
+                    }
+                }
+                _ =  time::sleep(Duration::from_millis(2000)) => {
+                    send_ping = true;
+                }
+
+            };
+        }
+    }
+}
+
+pub async fn udp_socket_test(control_sender: mpsc::Sender<ProxyMessage>) {
+    let (s, r) = oneshot::channel::<Option<SocketHandle>>();
+    let (send, mut read) = mpsc::channel::<SocketReadChannel>(10);
+
+    let _ = control_sender
+        .send(ProxyMessage::Connect {
+            msg: ConnectMessage::UDP {
+                local_port: 5000,
+                resp: s,
+                read: send,
+            },
+        })
+        .await;
+
+    if let Some(handle) = r.await.unwrap() {
+        println!("UDP socket created: {}", handle);
+        let mut send_ping = true;
+        let mut send_map = false;
+        loop {
+            if send_ping {
+                let _ = control_sender
+                    .send(ProxyMessage::Write {
+                        msg: WriteMessage::NAT {
+                            handle,
+                            opcode: 0x0,
+                        },
+                    })
+                    .await;
+                send_ping = false;
+            }
+            let _ = tokio::select! {
+                r = read.recv() => {
+                    if let Some((payload, addr)) = r {
+                        println!("UDP response received");
+                        if addr == IpAddress::v4(10,2,0,1){
+                            println!("Right endpoint");
+
+                            if payload.len() >= 12 {
+
+                                println!("Version: {}", payload[0]);
+                                println!("Opcode: {}", payload[1]);
+                                println!("Result: {}", u16::from_be_bytes([payload[2], payload[3]]));
+
+                                if payload[1] == 128 {
+                                    println!("Public IP: {}.{}.{}.{}", payload[8], payload[9], payload[10], payload[11]);
+
+                                } else if payload[1] == 129 {
+
+                                    println!("Internal Port: {}", u16::from_be_bytes([payload[8], payload[9]]));
+                                    println!("External Port: {}", u16::from_be_bytes([payload[10], payload[11]]));
+                                    println!("Lifetime in seconds: {}", u32::from_be_bytes([payload[12], payload[13], payload[14], payload[15]]));
+                                }
+                            }
+                            break;
+                        } else {
+                            println!("wrong endpoint");
+                            println!("{:#?}", payload.hex_dump());
+                        }
                     }
                 }
                 _ =  time::sleep(Duration::from_millis(2000)) => {
