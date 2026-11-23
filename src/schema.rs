@@ -6,7 +6,7 @@ use smoltcp::wire::{IpAddress, IpEndpoint};
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 
-pub type SocketReadChannel = (Bytes, IpAddress);
+pub type SocketReadChannel = Option<(Bytes, IpAddress)>;
 
 pub enum WriteMessage {
     ICMP {

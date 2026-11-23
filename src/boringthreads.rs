@@ -86,6 +86,11 @@ async fn udp_recv_task(
                         //println!("-->BORING RECEIVE: packet sent to channel");
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);
                     }
+                    TunnResult::Err(e) => {
+                        println!("-->RECEIVE: Error!");
+                        println!("{:?}", e);
+                        break;
+                    }
                     _ => {
                         println!("-->RECEIVE: Error!");
                         break;

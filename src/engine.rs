@@ -54,7 +54,12 @@ pub fn run_engine(
                 }
                 ProxyMessage::Write { msg } => {
                     eprintln!("Write");
-                    write_to_socket(msg, &mut socket_set, device.capabilities().clone());
+                    write_to_socket(
+                        msg,
+                        &mut socket_set,
+                        device.capabilities().clone(),
+                        &mut connection_map,
+                    );
                 }
                 ProxyMessage::Close => {
                     eprintln!("Engine Shutdown -- Terminating process");
@@ -97,7 +102,7 @@ fn poll_sockets(
                     }
 
                     while let Ok((data, addr)) = sock.recv() {
-                        match sender.try_send((Bytes::copy_from_slice(data), addr)) {
+                        match sender.try_send(Some((Bytes::copy_from_slice(data), addr))) {
                             Ok(_) => {}
                             Err(_) => break,
                         }
@@ -115,10 +120,10 @@ fn poll_sockets(
 
                     while sock.can_recv() {
                         if let Ok(len) = sock.recv_slice(&mut rx_buffer) {
-                            match sender.try_send((
+                            match sender.try_send(Some((
                                 Bytes::copy_from_slice(&rx_buffer[..len]),
                                 IpAddress::v4(0, 0, 0, 0),
-                            )) {
+                            ))) {
                                 Ok(_) => {}
                                 Err(e) => {
                                     eprintln!("TCP Read Channel Error: {}", e);
@@ -140,10 +145,10 @@ fn poll_sockets(
 
                     while sock.can_recv() {
                         if let Ok((len, meta_data)) = sock.recv_slice(&mut rx_buffer) {
-                            match sender.try_send((
+                            match sender.try_send(Some((
                                 Bytes::copy_from_slice(&rx_buffer[..len]),
                                 meta_data.endpoint.addr,
-                            )) {
+                            ))) {
                                 Ok(_) => {}
                                 Err(e) => {
                                     eprintln!("TCP Read Channel Error: {}", e);
@@ -260,7 +265,12 @@ fn create_socket(
     }
 }
 
-fn write_to_socket(msg: WriteMessage, socket_set: &mut SocketSet, device_caps: DeviceCapabilities) {
+fn write_to_socket(
+    msg: WriteMessage,
+    socket_set: &mut SocketSet,
+    device_caps: DeviceCapabilities,
+    connection_map: &mut HashMap<SocketHandle, mpsc::Sender<SocketReadChannel>>,
+) {
     match msg {
         WriteMessage::UDP {
             handle,
@@ -284,6 +294,8 @@ fn write_to_socket(msg: WriteMessage, socket_set: &mut SocketSet, device_caps: D
             let socket = socket_set.get_mut::<tcp::Socket>(handle);
 
             if !socket.can_send() {
+                let sender = connection_map.get_mut(&handle).unwrap();
+                sender.send(None);
                 eprintln!("Tried to write to closed socket");
                 return;
             }

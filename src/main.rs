@@ -7,13 +7,13 @@ pub mod engine;
 pub mod helper;
 pub mod schema;
 pub mod setup;
+pub mod socks5;
 pub mod test;
 
 //mod test;
 use boringthreads::spawn_boring_threads;
 use engine::run_engine;
 use setup::*;
-use test::*;
 
 use crate::schema::ProxyMessage;
 
@@ -25,7 +25,7 @@ async fn main() {
     //Communication channels for sync engine <--> async tasks
     let (vpn_sender, vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
     let (device_sender, device_receiver) = mpsc::channel::<Vec<u8>>(100);
-    let (control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
+    let (_control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
 
     //setup and start vpn tunnel tasks
     let (tunn, endpoint) = setup_tunnel(conf.clone());
@@ -33,17 +33,6 @@ async fn main() {
         .await
         .unwrap();
 
-    //ping_test(&vpn_sender, &mut device_receiver);
-    //let _join_handle = tokio::spawn (gateway_test(control_sender, device_sender, local_receiver));
-
-    tokio::spawn(async move {
-        socket_test(control_sender.clone()).await;
-        tcp_socket_test(control_sender.clone()).await;
-        udp_socket_test(control_sender.clone()).await;
-
-        println!("TESTS COMPLETED!!!!!");
-        let _ = control_sender.send(ProxyMessage::Close).await;
-    });
-
     run_engine(conf, device_receiver, vpn_sender, control_receiver);
 }
+
