@@ -5,12 +5,12 @@ A userspace WireGuard client that exposes the tunnel as a local SOCKS5 proxy. No
 ## How it works
 
 ```
-app ──SOCKS5──> socks5.rs ──ProxyMessage──> engine.rs (smoltcp) ──IP packets──> boringthreads.rs (boringtun) ──UDP──> WireGuard peer
+app ──SOCKS5──> socks5.rs ──ProxyMessage──> event_driven_engine (smoltcp) ──IP packets──> boringthreads.rs (boringtun) ──UDP──> WireGuard peer
 ```
 
 - **`setup.rs`** reads a standard WireGuard `.conf` file and builds the boringtun tunnel and smoltcp interface.
 - **`boringthreads.rs`** runs async tasks that encrypt and decrypt packets and exchange them with the peer over UDP.
-- **`engine.rs`** is a synchronous loop that drives the smoltcp interface. It creates and polls TCP, UDP and ICMP sockets in response to `ProxyMessage`s (see `schema.rs`) and handles NAT-PMP port-mapping requests.
+- **`event_driven_engine/`** is a tokio task that owns the smoltcp stack. It sleeps until a tunnel packet, a `ProxyMessage` (see `schema.rs`), a reader wake-up, or a smoltcp timer arrives, then moves data until nothing more can move. It manages TCP, UDP and ICMP sockets, queues TCP writes until the socket can send, holds received data while a reader's channel is full, and handles NAT-PMP port-mapping requests. A `None` on a socket's read channel means EOF; dropping the read channel closes the socket.
 - **`socks5.rs`** is a SOCKS5 server on `127.0.0.1:1080` (CONNECT only, no auth) that turns client connections into engine sockets.
 
 ## Usage
@@ -31,4 +31,4 @@ Tests read the WireGuard config from `$WG_CONFIG_PATH`, falling back to `cachy3-
 
 ## Status
 
-Work in progress. The tunnel works, and TCP, UDP, ICMP and NAT-PMP have been tested through the engine. The SOCKS5 server is written but `main.rs` does not start it yet.
+Work in progress. The tunnel works, and TCP, UDP, ICMP and NAT-PMP have been tested through the engine. The SOCKS5 server works (covered by `test_socks5_proxy`) but `main.rs` does not start it yet.

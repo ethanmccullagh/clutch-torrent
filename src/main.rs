@@ -3,16 +3,16 @@ use tokio::sync::mpsc;
 
 //import other files
 pub mod boringthreads;
-pub mod engine;
+pub mod event_driven_engine;
 pub mod helper;
 pub mod schema;
 pub mod setup;
 pub mod socks5;
-pub mod test;
+#[cfg(test)]
+mod tests;
 
-//mod test;
 use boringthreads::spawn_boring_threads;
-use engine::run_engine;
+use event_driven_engine::run_engine;
 use setup::*;
 
 use crate::schema::ProxyMessage;
@@ -33,5 +33,5 @@ async fn main() {
         .await
         .unwrap();
 
-    run_engine(conf, device_receiver, vpn_sender, control_receiver);
+    run_engine(conf, device_receiver, vpn_sender, control_receiver).await;
 }

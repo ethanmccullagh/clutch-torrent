@@ -5,23 +5,12 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 use core::net::SocketAddr;
 use ini::Ini;
 use smoltcp::iface::{Config, Interface, SocketSet};
-use smoltcp::phy::Tracer;
+use smoltcp::phy::{Device, Tracer};
 use smoltcp::wire::{HardwareAddress, IpCidr, Ipv4Address};
-use tokio::sync::mpsc;
 
-use crate::schema::*;
 
-pub fn setup_engine<'a>(
-    conf: Ini,
-    device_receiver: mpsc::Receiver<Vec<u8>>,
-    vpn_sender: mpsc::Sender<Vec<u8>>,
-) -> (Interface, Tracer<MyVirtualDevice>, SocketSet<'a>) {
+pub fn setup_engine<'a, D: Device>(conf: Ini, device: D) -> (Interface, Tracer<D>, SocketSet<'a>) {
     let config = Config::new(HardwareAddress::Ip);
-
-    let device = MyVirtualDevice {
-        rx_queue: device_receiver,
-        vpn_tx: vpn_sender,
-    };
 
     let mut tracer = Tracer::new(device, |_device, printer| {
         println!("---TRACER---");
