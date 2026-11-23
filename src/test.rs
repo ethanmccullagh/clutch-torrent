@@ -12,6 +12,9 @@ mod tests {
     use crate::engine::run_engine;
     use crate::setup::setup_tunnel;
     use crate::socks5::run_server;
+
+    // Every test opens its own WireGuard session with the same key; the server keeps one session per peer, so parallel tests break each other.
+    static TUNNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     use ini::Ini;
     use std::env;
 
@@ -20,7 +23,7 @@ mod tests {
 
     async fn start_test_environment() -> (mpsc::Sender<ProxyMessage>, mpsc::Sender<Vec<u8>>) {
         let config_path = env::var("WG_CONFIG_PATH")
-            .unwrap_or_else(|_| "/home/ethanm/Downloads/cachy3-CA-1208.conf".to_string());
+            .unwrap_or_else(|_| "cachy3-CA-1208.conf".to_string());
         let conf = Ini::load_from_file(config_path).expect("Failed to load WG config for testing");
 
         let (vpn_sender, vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
@@ -51,8 +54,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_ping() {
+        let _tunnel = TUNNEL_LOCK.lock().await;
         let config_path = env::var("WG_CONFIG_PATH")
-            .unwrap_or_else(|_| "/home/ethanm/Downloads/cachy3-CA-1208.conf".to_string());
+            .unwrap_or_else(|_| "cachy3-CA-1208.conf".to_string());
         let conf = Ini::load_from_file(config_path).expect("Failed to load WG config for testing");
 
         let (vpn_sender, vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
@@ -89,6 +93,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_icmp_socket() {
+        let _tunnel = TUNNEL_LOCK.lock().await;
         let (control_sender, _) = start_test_environment().await;
 
         let (s, r) = oneshot::channel();
@@ -134,6 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tcp_socket() {
+        let _tunnel = TUNNEL_LOCK.lock().await;
         let (control_sender, _) = start_test_environment().await;
 
         let (s, r) = oneshot::channel::<Option<smoltcp::iface::SocketHandle>>();
@@ -191,6 +197,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires real VPN config and network access"]
     async fn test_socks5_proxy() {
+        let _tunnel = TUNNEL_LOCK.lock().await;
         let (control_sender, _) = start_test_environment().await;
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

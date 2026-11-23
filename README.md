@@ -27,7 +27,7 @@ cargo run
 cargo test
 ```
 
-Most tests need a working WireGuard config and network access.
+Tests read the WireGuard config from `$WG_CONFIG_PATH`, falling back to `cachy3-CA-1208.conf` in the repo root, and need network access. Tests that open a tunnel take turns through a shared lock, because parallel WireGuard sessions with the same key break each other.
 
 ## Status
 

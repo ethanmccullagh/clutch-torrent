@@ -295,7 +295,7 @@ fn write_to_socket(
 
             if !socket.can_send() {
                 let sender = connection_map.get_mut(&handle).unwrap();
-                sender.send(None);
+                let _ = sender.try_send(None);
                 eprintln!("Tried to write to closed socket");
                 return;
             }
