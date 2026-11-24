@@ -4,9 +4,11 @@
 //! - `tunnel`:  raw packets through boringtun, no engine
 //! - `icmp`, `tcp`, `udp`, `nat_pmp`: engine sockets driven by `ProxyMessage`s
 //! - `socks5`:  the SOCKS5 server on 127.0.0.1:1080
+//! - `port_forward`: real inbound TCP and UDP from this machine's own network to the VPN's public address
 
 mod icmp;
 mod nat_pmp;
+mod port_forward;
 mod socks5;
 mod tcp;
 mod tunnel;
@@ -38,6 +40,10 @@ fn load_config() -> Ini {
         std::env::var("WG_CONFIG_PATH").unwrap_or_else(|_| "cachy3-CA-1208.conf".to_string());
     Ini::load_from_file(path).expect("Failed to load WG config for testing")
 }
+
+/// The shared SOCKS5 server's port-forwarded port: its first UDP association binds it. The
+/// port-forwarding test also forwards incoming TCP to 127.0.0.1 on this port.
+const INBOUND_PORT: u16 = 46881;
 
 /// The shared tunnel, engine and SOCKS5 server.
 struct TestEnv {
@@ -97,7 +103,7 @@ async fn start_env() -> TestEnv {
 
     let server_control = control_sender.clone();
     tokio::spawn(async move {
-        let _ = run_server(server_control).await;
+        let _ = run_server(server_control, Some(INBOUND_PORT)).await;
     });
 
     // Give the WireGuard handshake a moment

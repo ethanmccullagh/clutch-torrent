@@ -19,8 +19,10 @@ use tokio::task::AbortHandle;
 
 // Each direction; caps the TCP window, so too small throttles every connection.
 const TCP_BUFFER_SIZE: usize = 64 * 1024;
-// UDP/ICMP buffers must hold one full-MTU packet; smaller ones silently drop bigger datagrams.
-const UDP_BUFFER_SIZE: usize = MTU;
+// UDP/ICMP buffers must hold full-MTU packets; smaller ones silently drop bigger datagrams.
+// UDP holds several, or all but the first of a burst (e.g. DHT replies) are dropped.
+const UDP_PACKETS: usize = 32;
+const UDP_BUFFER_SIZE: usize = UDP_PACKETS * MTU;
 const ICMP_BUFFER_SIZE: usize = MTU;
 const READ_CHUNK: usize = 2048;
 // Without a timeout, a closing socket whose peer vanished retransmits its FIN forever and is never pruned.
@@ -38,7 +40,7 @@ struct Connection {
     eof_sent: bool,
     /// Ephemeral port picked by the engine, freed when the socket is removed.
     ephemeral_port: Option<u16>,
-    /// Outgoing TCP: the Connect reply, held until the handshake succeeds or fails.
+    /// TCP: the Connect reply, held until the handshake succeeds or fails.
     connecting: Option<oneshot::Sender<Option<SocketHandle>>>,
     kind: Kind,
 }
@@ -317,11 +319,11 @@ impl Engine {
                 read,
             } => {
                 let rx_buffer = udp::PacketBuffer::new(
-                    vec![udp::PacketMetadata::EMPTY],
+                    vec![udp::PacketMetadata::EMPTY; UDP_PACKETS],
                     vec![0; UDP_BUFFER_SIZE],
                 );
                 let tx_buffer = udp::PacketBuffer::new(
-                    vec![udp::PacketMetadata::EMPTY],
+                    vec![udp::PacketMetadata::EMPTY; UDP_PACKETS],
                     vec![0; UDP_BUFFER_SIZE],
                 );
                 let mut socket = udp::Socket::new(rx_buffer, tx_buffer);
@@ -378,7 +380,7 @@ impl Engine {
                     let _ = resp.send(None);
                     return;
                 }
-                wait_for_handshake = connect;
+                wait_for_handshake = true;
                 (self.sockets.add(socket), resp, read, Some(port), Kind::Tcp)
             }
             ConnectMessage::ICMP { resp, read } => {
@@ -406,8 +408,8 @@ impl Engine {
         self.connections.insert(handle, conn);
     }
 
-    /// Answer outgoing TCP connects whose handshake finished: the handle if it was established,
-    /// `None` if it was refused or timed out.
+    /// Answer TCP connects whose handshake finished (outgoing, or a peer connecting to a listening
+    /// socket): the handle if it was established, `None` if it was refused or timed out.
     fn finish_connects(&mut self) -> bool {
         let mut moved = false;
         for (handle, conn) in self.connections.iter_mut() {
@@ -415,7 +417,7 @@ impl Engine {
                 continue;
             }
             let result = match self.sockets.get::<tcp::Socket>(*handle).state() {
-                State::SynSent | State::SynReceived => continue,
+                State::Listen | State::SynSent | State::SynReceived => continue,
                 State::Closed => None,
                 // Established, or already closing after the peer sent data and a FIN.
                 _ => Some(*handle),
@@ -541,10 +543,15 @@ impl Engine {
                     Err(e) => eprintln!("ICMP socket {} send error: {}", handle, e),
                 }
             }
-            WriteMessage::NAT { opcode, .. } => {
+            WriteMessage::NAT {
+                opcode,
+                internal_port,
+                ..
+            } => {
                 let socket = self.sockets.get_mut::<udp::Socket>(handle);
                 let remote = IpEndpoint::new(IpAddress::Ipv4(self.gateway), 5351);
-                let port: [u8; 2] = socket.endpoint().port.to_be_bytes();
+                let port: [u8; 2] = internal_port.to_be_bytes();
+                // Asks for an hour; the server decides (Proton grants 60 s), so renew from the reply.
                 let data = [
                     //V  Op      Reserved  IntPort           ExtPort   Lifetime
                     0x0, opcode, 0x0, 0x0, port[0], port[1], 0x0, 0x0, 0x0, 0x0, 0x0E, 0x10,

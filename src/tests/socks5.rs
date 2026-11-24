@@ -3,7 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Connect to the proxy and complete the no-auth handshake.
-async fn handshake() -> TcpStream {
+pub(super) async fn handshake() -> TcpStream {
     let mut stream = TcpStream::connect("127.0.0.1:1080")
         .await
         .expect("Failed to connect to SOCKS5 proxy");
@@ -141,4 +141,131 @@ async fn unresolvable_domain() {
     )
     .await;
     assert_eq!(code, 4, "expected 'Host unreachable'");
+}
+
+/// Open a UDP association; return the control stream (closing it ends the association) and a UDP
+/// socket connected to the relay.
+pub(super) async fn udp_associate() -> (TcpStream, tokio::net::UdpSocket) {
+    // Declare our port, so datagrams that arrive before we send anything still reach us.
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let [hi, lo] = socket.local_addr().unwrap().port().to_be_bytes();
+    let mut stream = handshake().await;
+    stream
+        .write_all(&[5, 3, 0, 1, 0, 0, 0, 0, hi, lo])
+        .await
+        .unwrap();
+    let mut reply = [0u8; 10];
+    stream
+        .read_exact(&mut reply)
+        .await
+        .expect("no SOCKS5 reply");
+    assert_eq!(reply[..2], [5, 0], "UDP ASSOCIATE failed");
+    let relay = std::net::SocketAddr::from((
+        [reply[4], reply[5], reply[6], reply[7]],
+        u16::from_be_bytes([reply[8], reply[9]]),
+    ));
+    socket.connect(relay).await.unwrap();
+    (stream, socket)
+}
+
+/// A DNS query for example.com A with transaction id `id`.
+fn dns_query(id: u16) -> Vec<u8> {
+    let mut query = id.to_be_bytes().to_vec();
+    query.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+    query.extend_from_slice(b"\x07example\x03com\x00");
+    query.extend_from_slice(&[0, 1, 0, 1]);
+    query
+}
+
+/// Receive one relayed datagram; return its SOCKS5 header (10 bytes, IPv4) and payload.
+pub(super) async fn recv_relayed(socket: &tokio::net::UdpSocket) -> ([u8; 10], Vec<u8>) {
+    let mut buf = [0u8; 2048];
+    let n = tokio::time::timeout(Duration::from_secs(5), socket.recv(&mut buf))
+        .await
+        .expect("no datagram from the relay")
+        .unwrap();
+    (buf[..10].try_into().unwrap(), buf[10..n].to_vec())
+}
+
+#[tokio::test]
+async fn udp_associate_dns() {
+    let _tunnel = lock_tunnel().await;
+    test_env().await; // starts the shared SOCKS5 server
+    let (_control, socket) = udp_associate().await;
+
+    let mut datagram = vec![0, 0, 0, 1, 8, 8, 8, 8, 0, 53];
+    datagram.extend_from_slice(&dns_query(0xBEEF));
+    socket.send(&datagram).await.unwrap();
+
+    let (header, reply) = recv_relayed(&socket).await;
+    assert_eq!(
+        header,
+        [0, 0, 0, 1, 8, 8, 8, 8, 0, 53],
+        "reply header must name the sender"
+    );
+    assert_eq!(reply[..2], [0xBE, 0xEF], "reply id mismatch");
+}
+
+/// Replies that arrive together must all get through (DHT traffic is bursty).
+#[tokio::test]
+async fn udp_associate_burst() {
+    let _tunnel = lock_tunnel().await;
+    test_env().await; // starts the shared SOCKS5 server
+    let (_control, socket) = udp_associate().await;
+
+    for id in 0..20u16 {
+        let mut datagram = vec![0, 0, 0, 1, 8, 8, 8, 8, 0, 53];
+        datagram.extend_from_slice(&dns_query(id));
+        socket.send(&datagram).await.unwrap();
+    }
+    let mut seen = std::collections::HashSet::new();
+    while seen.len() < 20 {
+        let (_, reply) = recv_relayed(&socket).await;
+        seen.insert(u16::from_be_bytes([reply[0], reply[1]]));
+    }
+}
+
+/// A datagram addressed by hostname is resolved through the tunnel.
+#[tokio::test]
+async fn udp_associate_domain_target() {
+    let _tunnel = lock_tunnel().await;
+    test_env().await; // starts the shared SOCKS5 server
+    let (_control, socket) = udp_associate().await;
+
+    let mut datagram = vec![0, 0, 0, 3, 10];
+    datagram.extend_from_slice(b"dns.google");
+    datagram.extend_from_slice(&53u16.to_be_bytes());
+    datagram.extend_from_slice(&dns_query(0xCAFE));
+    socket.send(&datagram).await.unwrap();
+
+    let (header, reply) = recv_relayed(&socket).await;
+    assert_eq!(
+        header[3], 1,
+        "reply header should carry the resolved IPv4 address"
+    );
+    assert_eq!(reply[..2], [0xCA, 0xFE], "reply id mismatch");
+}
+
+/// Closing the control connection ends the association and closes the relay socket.
+#[tokio::test]
+async fn udp_association_ends_with_control_connection() {
+    let _tunnel = lock_tunnel().await;
+    test_env().await; // starts the shared SOCKS5 server
+    let (control, socket) = udp_associate().await;
+    drop(control);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A closed local UDP port answers with ICMP port unreachable, reported on the next recv.
+    // Blocking std socket: tokio's recv isn't woken by a socket error alone.
+    let socket = socket.into_std().unwrap();
+    socket.set_nonblocking(false).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    socket.send(&[0, 0, 0, 1, 8, 8, 8, 8, 0, 53]).unwrap();
+    let result = socket.recv(&mut [0u8; 64]);
+    assert!(
+        matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused),
+        "relay still open after the control connection closed: {result:?}"
+    );
 }

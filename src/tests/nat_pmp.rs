@@ -17,7 +17,11 @@ async fn request(local_port: u16, opcode: u8) -> Bytes {
 
     control
         .send(ProxyMessage::Write {
-            msg: WriteMessage::NAT { handle, opcode },
+            msg: WriteMessage::NAT {
+                handle,
+                opcode,
+                internal_port: local_port,
+            },
         })
         .await
         .unwrap();

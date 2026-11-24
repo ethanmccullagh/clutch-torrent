@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 pub mod boringthreads;
 pub mod event_driven_engine;
 pub mod helper;
+pub mod port_forward;
 pub mod schema;
 pub mod setup;
 pub mod socks5;
@@ -19,10 +20,18 @@ use crate::schema::ProxyMessage;
 
 #[tokio::main]
 async fn main() {
-    // Usage: native [config.conf]
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "cachy3-CA-1208.conf".to_string());
+    // Usage: native [config.conf] [--forward <client listen port>]
+    let mut config_path = "cachy3-CA-1208.conf".to_string();
+    let mut forward_port = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--forward" {
+            let port = args.next().and_then(|p| p.parse::<u16>().ok());
+            forward_port = Some(port.expect("--forward needs the client's listen port"));
+        } else {
+            config_path = arg;
+        }
+    }
     let conf = Ini::load_from_file(&config_path)
         .unwrap_or_else(|e| panic!("failed to load WireGuard config {config_path}: {e}"));
 
@@ -37,11 +46,27 @@ async fn main() {
         .await
         .expect("failed to bind UDP socket for the WireGuard tunnel");
 
-    tokio::select! {
-        _ = run_engine(conf, device_receiver, vpn_sender, control_receiver) => {
-            eprintln!("engine stopped");
+    let mut engine = tokio::spawn(run_engine(
+        conf,
+        device_receiver,
+        vpn_sender,
+        control_receiver,
+    ));
+
+    if let Some(port) = forward_port {
+        match port_forward::start_port_forward(control_sender.clone(), port).await {
+            Ok(mapping) => println!(
+                "Incoming connections forwarded to 127.0.0.1:{port}. Set the client's listen port \
+                 to {port} and its announced port to {}: {mapping}",
+                mapping.tcp_port
+            ),
+            Err(e) => eprintln!("port forwarding unavailable: {e:#}"),
         }
-        result = socks5::run_server(control_sender) => {
+    }
+
+    tokio::select! {
+        _ = &mut engine => eprintln!("engine stopped"),
+        result = socks5::run_server(control_sender, forward_port) => {
             if let Err(e) = result {
                 eprintln!("SOCKS5 server failed: {e}");
             }

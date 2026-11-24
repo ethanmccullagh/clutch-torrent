@@ -25,9 +25,12 @@ pub enum WriteMessage {
         dst: [u8; 4],
         dst_port: u16,
     },
+    /// NAT-PMP request to the gateway, sent from this UDP socket: opcode 0 asks for the public
+    /// address, 1 maps a UDP port, 2 a TCP port. The reply arrives on the socket's read channel.
     NAT {
         handle: SocketHandle,
         opcode: u8,
+        internal_port: u16,
     },
 }
 
@@ -36,6 +39,9 @@ pub enum ConnectMessage {
         resp: oneshot::Sender<Option<SocketHandle>>,
         read: mpsc::Sender<SocketReadChannel>,
     },
+    /// `connect: true` connects to `remote`; the reply comes once the handshake finishes.
+    /// `connect: false` listens on `local_port` (`remote` unused); the reply comes once a peer
+    /// connects. Each listening socket accepts one connection.
     TCP {
         remote: IpEndpoint,
         local_port: u16,
