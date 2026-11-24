@@ -27,6 +27,23 @@ To accept incoming connections (seeding), pass the client's listen port. The bri
 cargo run -- path/to/wireguard.conf --forward 6881
 ``` Set `TRACE_PACKETS=1` to print every packet.
 
+## Desktop app: Clutch
+
+Clutch is a Tauri app in `src-tauri/` with a plain HTML/JS frontend in `ui/` (no npm build step): the base of a torrent client. It has a single torrent list, a settings dialog with a light/dark theme, an add-torrent dialog (magnet link or .torrent file), and a connection dialog that starts and stops the bridge with optional port forwarding; the status bar shows the VPN state, proxy address and announced port. There is no torrent engine yet: added torrents are only listed, as "Waiting for engine".
+
+```sh
+cargo tauri dev      # run it (needs tauri-cli: cargo install tauri-cli)
+cargo tauri build    # release binary; bundling is off until real icons and metadata exist
+```
+
+On Linux, the taskbar icon comes from an installed desktop entry, not from the app itself. For a dev build, install one (and remove it with `--uninstall`):
+
+```sh
+scripts/install-desktop-entry.sh          # entry runs target/debug/clutch; pass another path to change
+```
+
+The app icons in `src-tauri/icons/` are generated from the logo, `ui/icons/clutch-logo.svg`; after changing it, run `cargo tauri icon ../ui/icons/clutch-logo.svg` from `src-tauri/` (and delete the `android/` and `ios/` folders it also creates).
+
 ## Tests
 
 ```sh

@@ -47,8 +47,20 @@ pub async fn run_server(
     proxy_tx: mpsc::Sender<ProxyMessage>,
     inbound_port: Option<u16>,
 ) -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:1080").await?;
-    println!("SOCKS5 server listening on 127.0.0.1:1080");
+    serve(
+        TcpListener::bind(crate::SOCKS_ADDR).await?,
+        proxy_tx,
+        inbound_port,
+    )
+    .await
+}
+
+/// `run_server` on an already bound listener, so callers can report a bind failure up front.
+pub async fn serve(
+    listener: TcpListener,
+    proxy_tx: mpsc::Sender<ProxyMessage>,
+    inbound_port: Option<u16>,
+) -> Result<()> {
     let inbound: InboundPort = inbound_port.map(|port| (port, Arc::new(Semaphore::new(1))));
 
     loop {

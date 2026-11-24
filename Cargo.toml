@@ -3,6 +3,10 @@ name = "native"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+# The Tauri app; plain `cargo test`/`cargo build` here still only builds the bridge.
+members = ["src-tauri"]
+
 [dependencies]
 anyhow = "1.0"
 tokio = { version = "1.0", features = ["full"] }

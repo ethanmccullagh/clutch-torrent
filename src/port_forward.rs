@@ -40,6 +40,9 @@ pub async fn start_port_forward(
     tokio::spawn(async move {
         let mut current = mapping;
         loop {
+            if nat.proxy_tx.is_closed() {
+                return; // engine stopped
+            }
             // RFC 6886: renew at half the lifetime.
             tokio::time::sleep(Duration::from_secs((current.lifetime / 2).max(1).into())).await;
             match nat.map(port).await {

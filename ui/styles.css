@@ -1,0 +1,332 @@
+/* Material-style palettes built from the logo's blue (#1f4fd8, icons/clutch-logo.svg), picked
+   by `data-theme` on <html> (see theme.js). Swap these to retheme. */
+:root {
+  --radius: 4px;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --primary: #1f4fd8;
+  --primary-hover: #183ead;
+  --on-primary: #ffffff;
+  --secondary: #7f9deb; /* focus rings: a tint, so it shows against primary buttons too */
+  --background: #f4f6fb;
+  --surface: #ffffff;
+  --on-surface: #1b1f2a;
+  --on-surface-muted: #5a6072;
+  --divider: #dfe3ee;
+  --hover: rgb(31 79 216 / 0.05);
+  --error: #b00020;
+  --success: #2e7d32;
+  /* Light theme: the app bar is primary-coloured, with white buttons on it. */
+  --bar: var(--primary);
+  --on-bar: var(--on-primary);
+  --bar-button: #ffffff;
+  --on-bar-button: var(--primary);
+  --bar-outline: rgb(255 255 255 / 0.7);
+}
+/* Dark is the default: plain :root here, so it also applies before theme.js runs. */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  /* A lighter tint of the logo blue: #1f4fd8 itself is too dark to read on a dark surface. */
+  --primary: #8fa9f2;
+  --primary-hover: #b0c3f6;
+  --on-primary: #0a1a47;
+  --secondary: #c3d1f8;
+  --background: #121318;
+  --surface: #1d1f26;
+  --on-surface: #e4e6ee;
+  --on-surface-muted: #a0a5b4;
+  --divider: #30333d;
+  --hover: rgb(143 169 242 / 0.08);
+  --error: #cf6679;
+  --success: #81c784;
+  /* Dark theme: Material uses a surface-coloured app bar instead of a bright one. */
+  --bar: #252832;
+  --on-bar: var(--on-surface);
+  --bar-button: var(--primary);
+  --on-bar-button: var(--on-primary);
+  --bar-outline: var(--divider);
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--background);
+  color: var(--on-surface);
+  font: 14px/1.4 Roboto, system-ui, sans-serif;
+}
+
+/* ---- App bar ---- */
+.app-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--bar);
+  color: var(--on-bar);
+  box-shadow: 0 2px 4px rgb(0 0 0 / 0.2);
+}
+.logo {
+  display: block;
+}
+.app-bar h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 500;
+  flex: 1;
+}
+.actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.app-bar .button.contained {
+  background: var(--bar-button);
+  color: var(--on-bar-button);
+}
+.app-bar .button.outlined {
+  color: var(--on-bar);
+  border-color: var(--bar-outline);
+}
+
+/* ---- Buttons ---- */
+.button {
+  border-radius: var(--radius);
+  padding: 0.45rem 1rem;
+  font: inherit;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: none;
+}
+.button.contained {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+.button.contained:hover {
+  background: var(--primary-hover);
+}
+.button.outlined {
+  border-color: var(--divider);
+  color: var(--primary);
+}
+.button.text {
+  color: var(--primary);
+  padding: 0.45rem 0.5rem;
+}
+.button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--secondary);
+  outline-offset: 2px;
+}
+
+/* ---- Torrent table ---- */
+main {
+  flex: 1;
+  overflow: auto;
+  scrollbar-color: var(--on-surface-muted) var(--surface);
+  margin: 1rem;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.15);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  padding: 0.6rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--divider);
+  white-space: nowrap;
+}
+th {
+  font-weight: 500;
+  color: var(--on-surface-muted);
+  font-size: 0.8rem;
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+}
+/* The name column takes the spare width; other columns stay as narrow as their content. */
+th:first-child,
+td.name {
+  width: 100%;
+}
+td.name {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+tbody tr:hover {
+  background: var(--hover);
+}
+/* Styled by hand so the track follows the theme (the native one stays light in dark mode).
+   -webkit-: Tauri's WebKitGTK/WebKit; -moz-: Firefox, for previews. */
+progress {
+  appearance: none;
+  width: 8rem;
+  height: 0.4rem;
+  vertical-align: middle;
+  border: 0;
+  border-radius: 2px;
+  background: var(--divider);
+}
+progress::-webkit-progress-bar {
+  background: var(--divider);
+  border-radius: 2px;
+}
+progress::-webkit-progress-value {
+  background: var(--primary);
+  border-radius: 2px;
+}
+progress::-moz-progress-bar {
+  background: var(--primary);
+  border-radius: 2px;
+}
+.status.seeding,
+.status.completed {
+  color: var(--success);
+}
+.status.waiting,
+.status.paused {
+  color: var(--on-surface-muted);
+}
+.empty {
+  padding: 3rem 1rem;
+  text-align: center;
+  color: var(--on-surface-muted);
+}
+
+/* ---- Status bar ---- */
+.status-bar {
+  display: flex;
+  gap: 1.5rem;
+  padding: 0.4rem 1rem;
+  background: var(--surface);
+  border-top: 1px solid var(--divider);
+  color: var(--on-surface-muted);
+  font-size: 0.85rem;
+}
+.status-bar > span {
+  white-space: nowrap;
+}
+.status-bar strong {
+  color: var(--on-surface);
+  font-weight: 500;
+}
+.spacer {
+  flex: 1;
+}
+.dot {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+  background: var(--error);
+}
+.dot.on {
+  background: var(--success);
+}
+
+/* ---- Dialogs and forms ---- */
+dialog {
+  background: var(--surface);
+  color: var(--on-surface);
+  border: 0;
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  width: min(28rem, 90vw);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.3);
+}
+dialog::backdrop {
+  background: rgb(0 0 0 / 0.4);
+}
+dialog h2 {
+  margin: 0 0 1rem;
+  font-size: 1.15rem;
+  font-weight: 500;
+}
+label {
+  display: block;
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.85rem;
+  color: var(--on-surface-muted);
+}
+input {
+  width: 100%;
+  padding: 0.5rem;
+  font: inherit;
+  color: var(--on-surface);
+  background: var(--surface);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius);
+}
+fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+legend {
+  font-size: 0.85rem;
+  color: var(--on-surface-muted);
+  margin-bottom: 0.25rem;
+}
+label.choice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.4rem 0;
+  font-size: 1rem;
+  color: var(--on-surface);
+  cursor: pointer;
+}
+input[type="radio"] {
+  width: auto;
+  accent-color: var(--primary);
+}
+input:focus {
+  border-color: var(--primary);
+}
+.or {
+  margin: 0.75rem 0 0;
+  text-align: center;
+  color: var(--on-surface-muted);
+}
+.error {
+  color: var(--error);
+  min-height: 1.2em;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}

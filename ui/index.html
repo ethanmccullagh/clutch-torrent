@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Clutch</title>
+    <link rel="icon" href="icons/clutch-logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+    <!-- Not deferred: sets the saved theme before the first paint, so there's no flash. -->
+    <script src="theme.js"></script>
+    <script src="main.js" defer></script>
+  </head>
+  <body>
+    <header class="app-bar">
+      <img class="logo" src="icons/clutch-logo.svg" alt="" width="32" height="32" />
+      <h1>Clutch</h1>
+      <div class="actions">
+        <button id="open-add" class="button contained">Add torrent</button>
+        <button id="open-connection" class="button outlined">Connection</button>
+        <button id="open-settings" class="button outlined">Settings</button>
+      </div>
+    </header>
+
+    <main>
+      <table id="torrents">
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col" class="num">Size</th>
+            <th scope="col">Progress</th>
+            <th scope="col">Status</th>
+            <th scope="col" class="num">Down</th>
+            <th scope="col" class="num">Up</th>
+            <th scope="col" class="num">Peers</th>
+            <th scope="col"><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody id="torrent-rows"></tbody>
+      </table>
+      <p id="empty" class="empty">No torrents yet. Add a magnet link or a .torrent file.</p>
+    </main>
+
+    <footer class="status-bar" aria-live="polite">
+      <span><span id="vpn-dot" class="dot"></span>VPN: <strong id="vpn-state">Disconnected</strong></span>
+      <span>Proxy: <code id="socks-addr">–</code></span>
+      <span>Announced port: <code id="public-port">–</code></span>
+      <span class="spacer"></span>
+      <span>↓ <span id="total-down">0 B/s</span></span>
+      <span>↑ <span id="total-up">0 B/s</span></span>
+    </footer>
+
+    <dialog id="add-dialog" aria-labelledby="add-title">
+      <form id="add-form" method="dialog">
+        <h2 id="add-title">Add torrent</h2>
+        <label for="magnet">Magnet link</label>
+        <input id="magnet" placeholder="magnet:?xt=urn:btih:…" autocomplete="off" />
+        <p class="or">or</p>
+        <label for="torrent-file">Torrent file</label>
+        <input id="torrent-file" type="file" accept=".torrent" />
+        <p id="add-error" class="error" role="alert"></p>
+        <div class="dialog-actions">
+          <button type="button" class="button text" data-close>Cancel</button>
+          <button type="submit" class="button contained">Add</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="settings-dialog" aria-labelledby="settings-title">
+      <form method="dialog">
+        <h2 id="settings-title">Settings</h2>
+        <fieldset>
+          <legend>Theme</legend>
+          <label class="choice"><input type="radio" name="theme" value="light" /> Light</label>
+          <label class="choice"><input type="radio" name="theme" value="dark" /> Dark</label>
+        </fieldset>
+        <div class="dialog-actions">
+          <button type="submit" class="button text">Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="connection-dialog" aria-labelledby="connection-title">
+      <form id="connection-form">
+        <h2 id="connection-title">Connection</h2>
+        <label for="config-path">WireGuard config file</label>
+        <input id="config-path" required placeholder="/path/to/wireguard.conf" />
+        <label for="forward-port">Listen port to forward (optional)</label>
+        <input id="forward-port" type="number" min="1" max="65535" placeholder="e.g. 6881" />
+        <p id="connection-error" class="error" role="alert"></p>
+        <div class="dialog-actions">
+          <button type="button" class="button text" data-close>Close</button>
+          <button id="stop" type="button" class="button outlined" disabled>Disconnect</button>
+          <button id="start" type="submit" class="button contained">Connect</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>
