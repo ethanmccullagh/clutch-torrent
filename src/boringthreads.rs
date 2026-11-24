@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 pub async fn spawn_boring_threads(
     tunn: Tunn,
     endpoint: SocketAddr,
-    vpn_receiver: mpsc::Receiver<Vec<u8>>,
+    vpn_receiver: mpsc::UnboundedReceiver<Vec<u8>>,
     device_sender: mpsc::Sender<Vec<u8>>,
 ) -> Result<Vec<JoinHandle<()>>> {
     let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -127,7 +127,7 @@ async fn udp_recv_task(
 
 async fn udp_transmit_task(
     socket: Arc<UdpSocket>,
-    mut receiver: mpsc::Receiver<Vec<u8>>,
+    mut receiver: mpsc::UnboundedReceiver<Vec<u8>>,
     endpoint: SocketAddr,
     t: Arc<Mutex<Tunn>>,
 ) {

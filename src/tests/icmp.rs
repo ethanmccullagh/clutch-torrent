@@ -18,7 +18,7 @@ async fn echo() {
                 msg: WriteMessage::ICMP {
                     handle,
                     dst: [8, 8, 8, 8],
-                    ident: 0x1234,
+                    ident: 0x4242, // not the old hardcoded 0x1234: the socket must bind to this one
                     seq,
                 },
             })
@@ -29,11 +29,10 @@ async fn echo() {
         loop {
             match tokio::time::timeout_at(deadline, read.recv()).await {
                 Ok(Some(Some((data, from)))) => {
-                    if parse_and_print_icmp_noip(&data, from) {
+                    if parse_and_print_icmp_noip(&data, from.addr) {
                         got_reply = true;
                         break 'ping;
                     }
-                    // The server's MTU probes are echo requests with our ident; they reach this socket too.
                     println!(
                         "skipping non-reply ICMP packet ({} bytes) from {from}",
                         data.len()

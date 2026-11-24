@@ -1,7 +1,7 @@
 use super::*;
 use crate::schema::WriteMessage;
 use bytes::Bytes;
-use smoltcp::wire::IpAddress;
+use smoltcp::wire::{IpAddress, IpEndpoint};
 
 /// Resolve example.com with a DNS query to 8.8.8.8:53.
 #[tokio::test]
@@ -33,7 +33,7 @@ async fn dns_query() {
         .unwrap();
 
     let (reply, from) = recv_packet(&mut read).await;
-    assert_eq!(from, IpAddress::v4(8, 8, 8, 8));
+    assert_eq!(from, IpEndpoint::new(IpAddress::v4(8, 8, 8, 8), 53));
     assert_eq!(&reply[..2], &[0xBE, 0xEF], "reply id mismatch");
     assert!(reply[2] & 0x80 != 0, "not a DNS response");
     assert_eq!(reply[3] & 0x0F, 0, "DNS error rcode");
@@ -73,4 +73,45 @@ async fn large_reply() {
 
     let (reply, _) = recv_packet(&mut read).await;
     assert!(reply.len() > 256, "reply only {} bytes", reply.len());
+}
+
+/// A TCP write to a UDP handle is dropped; the engine must survive it (smoltcp would panic).
+#[tokio::test]
+async fn wrong_socket_type_write() {
+    let _tunnel = lock_tunnel().await;
+    let control = start_test_environment().await;
+    let (handle, mut read) = connect(&control, |resp, read| ConnectMessage::UDP {
+        local_port: 0,
+        resp,
+        read,
+    })
+    .await;
+
+    control
+        .send(ProxyMessage::Write {
+            msg: WriteMessage::TCP {
+                handle,
+                data: Bytes::from_static(b"wrong"),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Engine still alive: a DNS query on the same socket gets answered.
+    let mut query = vec![0xBE, 0xEF, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+    query.extend_from_slice(b"\x07example\x03com\x00");
+    query.extend_from_slice(&[0, 1, 0, 1]);
+    control
+        .send(ProxyMessage::Write {
+            msg: WriteMessage::UDP {
+                handle,
+                data: Bytes::from(query),
+                dst: [8, 8, 8, 8],
+                dst_port: 53,
+            },
+        })
+        .await
+        .unwrap();
+    let (reply, _) = recv_packet(&mut read).await;
+    assert_eq!(&reply[..2], &[0xBE, 0xEF], "reply id mismatch");
 }

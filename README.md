@@ -11,15 +11,15 @@ app ──SOCKS5──> socks5.rs ──ProxyMessage──> event_driven_engine 
 - **`setup.rs`** reads a standard WireGuard `.conf` file and builds the boringtun tunnel and smoltcp interface.
 - **`boringthreads.rs`** runs async tasks that encrypt and decrypt packets and exchange them with the peer over UDP.
 - **`event_driven_engine/`** is a tokio task that owns the smoltcp stack. It sleeps until a tunnel packet, a `ProxyMessage` (see `schema.rs`), a reader wake-up, or a smoltcp timer arrives, then moves data until nothing more can move. It manages TCP, UDP and ICMP sockets, queues TCP writes until the socket can send, holds received data while a reader's channel is full, and handles NAT-PMP port-mapping requests. A `None` on a socket's read channel means EOF; dropping the read channel closes the socket.
-- **`socks5.rs`** is a SOCKS5 server on `127.0.0.1:1080` (CONNECT only, no auth) that turns client connections into engine sockets.
+- **`socks5.rs`** is a SOCKS5 server on `127.0.0.1:1080` (CONNECT only, IPv4 only, no auth) that turns client connections into engine sockets. Hostnames are resolved through the tunnel, so DNS doesn't leak.
 
 ## Usage
 
-The config path is currently hardcoded in `src/main.rs`. Point it at your WireGuard config, then:
-
 ```sh
-cargo run
+cargo run -- path/to/wireguard.conf   # defaults to cachy3-CA-1208.conf
 ```
+
+Then point your client at the SOCKS5 proxy `127.0.0.1:1080`. Set `TRACE_PACKETS=1` to print every packet.
 
 ## Tests
 
@@ -27,8 +27,8 @@ cargo run
 cargo test
 ```
 
-Tests read the WireGuard config from `$WG_CONFIG_PATH`, falling back to `cachy3-CA-1208.conf` in the repo root, and need network access. Tests that open a tunnel take turns through a shared lock, because parallel WireGuard sessions with the same key break each other.
+Tests read the WireGuard config from `$WG_CONFIG_PATH`, falling back to `cachy3-CA-1208.conf` in the repo root, and need network access. They share one tunnel and run one at a time, because parallel WireGuard sessions with the same key break each other.
 
 ## Status
 
-Work in progress. The tunnel works, and TCP, UDP, ICMP and NAT-PMP have been tested through the engine. The SOCKS5 server works (covered by `test_socks5_proxy`) but `main.rs` does not start it yet.
+Work in progress. The tunnel works, and TCP, UDP, ICMP and NAT-PMP have been tested through the engine. The SOCKS5 server supports CONNECT; UDP ASSOCIATE and incoming connections are not implemented yet.

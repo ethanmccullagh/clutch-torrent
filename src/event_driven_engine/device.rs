@@ -11,11 +11,13 @@ pub const MTU: usize = 1420;
 /// and pushes received packets into `inbox` before polling.
 pub struct QueueDevice {
     pub inbox: VecDeque<Vec<u8>>,
-    pub vpn_tx: mpsc::Sender<Vec<u8>>,
+    // Unbounded: smoltcp can't wait for room, so a bounded channel would drop packets. TCP windows
+    // and socket buffers already limit how much the engine emits.
+    pub vpn_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl QueueDevice {
-    pub fn new(vpn_tx: mpsc::Sender<Vec<u8>>) -> Self {
+    pub fn new(vpn_tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
         Self {
             inbox: VecDeque::new(),
             vpn_tx,
@@ -75,7 +77,7 @@ impl RxToken for ChannelRxToken {
 }
 
 pub struct ChannelTxToken<'a> {
-    vpn_tx: &'a mpsc::Sender<Vec<u8>>,
+    vpn_tx: &'a mpsc::UnboundedSender<Vec<u8>>,
 }
 impl<'a> TxToken for ChannelTxToken<'a> {
     fn consume<R, F>(self, len: usize, f: F) -> R
@@ -86,8 +88,8 @@ impl<'a> TxToken for ChannelTxToken<'a> {
         let mut buffer: Vec<u8> = vec![0u8; len];
         let result: R = f(&mut buffer);
 
-        if let Err(e) = self.vpn_tx.try_send(buffer) {
-            eprintln!("ENGINE VPN TX CHANNEL ERROR {}", e);
+        if self.vpn_tx.send(buffer).is_err() {
+            eprintln!("tunnel transmit task is gone, packet dropped");
         }
 
         result

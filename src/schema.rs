@@ -1,11 +1,12 @@
 use bytes::Bytes;
 use smoltcp::iface::SocketHandle;
-use smoltcp::wire::{IpAddress, IpEndpoint};
+use smoltcp::wire::IpEndpoint;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 
-/// `Some((data, from))` is received data. `None` is EOF: the TCP connection closed or failed.
-pub type SocketReadChannel = Option<(Bytes, IpAddress)>;
+/// `Some((data, from))` is received data; `from` is the sender (port 0 for ICMP). `None` is EOF:
+/// the TCP connection closed or failed.
+pub type SocketReadChannel = Option<(Bytes, IpEndpoint)>;
 
 pub enum WriteMessage {
     ICMP {
@@ -50,8 +51,17 @@ pub enum ConnectMessage {
 }
 
 pub enum ProxyMessage {
-    Connect { msg: ConnectMessage },
-    Write { msg: WriteMessage },
+    Connect {
+        msg: ConnectMessage,
+    },
+    /// Look up a hostname's IPv4 address through the tunnel. `None` if it doesn't resolve.
+    Resolve {
+        name: String,
+        resp: oneshot::Sender<Option<std::net::Ipv4Addr>>,
+    },
+    Write {
+        msg: WriteMessage,
+    },
     Close,
 }
 

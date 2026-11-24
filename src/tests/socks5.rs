@@ -33,10 +33,24 @@ fn domain_connect(domain: &str, port: u16) -> Vec<u8> {
     req
 }
 
-/// 4 KB round trip through the echo server: many times the engine's 256-byte socket
+/// Write `payload` through the proxied stream and check the echo server sends it back.
+async fn assert_echo(stream: &mut TcpStream, payload: &[u8]) {
+    let (mut reader, mut writer) = stream.split();
+    let mut echoed = vec![0u8; payload.len()];
+    let (write, read) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(writer.write_all(payload), reader.read_exact(&mut echoed))
+    })
+    .await
+    .expect("SOCKS5 echo timed out");
+    write.unwrap();
+    read.unwrap();
+    assert!(echoed == payload, "SOCKS5 echo mismatch");
+}
+
+/// 256 KB round trip through the echo server: several times the engine's 64 KB socket
 /// buffers, so it exercises queued writes and read backpressure.
 #[tokio::test]
-async fn echo_4kb() {
+async fn echo_256kb() {
     let _tunnel = lock_tunnel().await;
     test_env().await; // starts the shared SOCKS5 server
     let mut stream = handshake().await;
@@ -45,27 +59,64 @@ async fn echo_4kb() {
     let code = request(&mut stream, &[5, 1, 0, 1, 45, 79, 112, 203, 0x10, 0x92]).await;
     assert_eq!(code, 0, "SOCKS5 CONNECT failed");
 
-    let mut payload: Vec<u8> = (0..4095u32).map(|i| b'a' + (i % 26) as u8).collect();
-    payload.push(b'\n');
-    stream.write_all(&payload).await.unwrap();
-
-    let mut echoed = vec![0u8; payload.len()];
-    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut echoed))
-        .await
-        .expect("SOCKS5 echo timed out")
-        .unwrap();
-    assert!(echoed == payload, "SOCKS5 echo mismatch");
+    // 1 KB lines: the echo server is line based.
+    let payload: Vec<u8> = (0..256 * 1024u32)
+        .map(|i| {
+            if i % 1024 == 1023 {
+                b'\n'
+            } else {
+                b'a' + (i % 26) as u8
+            }
+        })
+        .collect();
+    assert_echo(&mut stream, &payload).await;
 }
 
+/// The hostname is resolved through the tunnel, then the connection works end to end.
 #[tokio::test]
-#[ignore = "bug: socks5.rs connects to the first resolved address; an IPv6 one panics smoltcp (no IPv6 source address)"]
 async fn connect_by_domain() {
     let _tunnel = lock_tunnel().await;
     test_env().await; // starts the shared SOCKS5 server
     let mut stream = handshake().await;
 
-    let code = request(&mut stream, &domain_connect("www.google.com", 80)).await;
+    let code = request(&mut stream, &domain_connect("tcpbin.com", 4242)).await;
     assert_eq!(code, 0, "SOCKS5 CONNECT failed");
+    assert_echo(&mut stream, b"hello by name\n").await;
+}
+
+/// The server closes after its HTTP/1.0 response; the client must see that EOF.
+#[tokio::test]
+async fn remote_close_reaches_client() {
+    let _tunnel = lock_tunnel().await;
+    test_env().await; // starts the shared SOCKS5 server
+    let mut stream = handshake().await;
+
+    let code = request(&mut stream, &domain_connect("example.com", 80)).await;
+    assert_eq!(code, 0, "SOCKS5 CONNECT failed");
+    stream
+        .write_all(b"GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut response))
+        .await
+        .expect("no EOF after the server closed")
+        .unwrap();
+    assert!(response.starts_with(b"HTTP/1."), "not an HTTP response");
+}
+
+#[tokio::test]
+async fn ipv6_is_unsupported() {
+    let _tunnel = lock_tunnel().await;
+    test_env().await; // starts the shared SOCKS5 server
+    let mut stream = handshake().await;
+
+    let mut req = vec![5, 1, 0, 4];
+    req.extend_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+    req.extend_from_slice(&80u16.to_be_bytes());
+    let code = request(&mut stream, &req).await;
+    assert_eq!(code, 8, "expected 'Address type not supported'");
 }
 
 #[tokio::test]
@@ -79,7 +130,6 @@ async fn bind_is_unsupported() {
 }
 
 #[tokio::test]
-#[ignore = "bug: socks5.rs closes the connection on DNS failure instead of replying 4"]
 async fn unresolvable_domain() {
     let _tunnel = lock_tunnel().await;
     test_env().await; // starts the shared SOCKS5 server

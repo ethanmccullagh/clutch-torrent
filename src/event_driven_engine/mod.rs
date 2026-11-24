@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 pub async fn run_engine(
     conf: Ini,
     mut device_receiver: mpsc::Receiver<Vec<u8>>,
-    vpn_sender: mpsc::Sender<Vec<u8>>,
+    vpn_sender: mpsc::UnboundedSender<Vec<u8>>,
     mut control_receiver: mpsc::Receiver<ProxyMessage>,
 ) {
     let (wake_tx, mut wake_rx) = mpsc::unbounded_channel();
@@ -38,6 +38,7 @@ pub async fn run_engine(
             msg = control_receiver.recv() => match msg {
                 Some(ProxyMessage::Connect { msg }) => engine.connect(msg),
                 Some(ProxyMessage::Write { msg }) => engine.write(msg),
+                Some(ProxyMessage::Resolve { name, resp }) => engine.resolve(&name, resp),
                 Some(ProxyMessage::Close) | None => break,
             },
             Some(handle) = wake_rx.recv() => engine.unblock(handle),

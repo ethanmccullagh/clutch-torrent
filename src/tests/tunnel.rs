@@ -10,7 +10,6 @@ async fn raw_ping() {
 
     env.vpn
         .send(create_icmp_packet([10, 2, 0, 2], [8, 8, 8, 8]))
-        .await
         .unwrap();
 
     let got_reply = tokio::time::timeout(Duration::from_secs(5), async {

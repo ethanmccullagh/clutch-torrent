@@ -1,12 +1,30 @@
 use anyhow::Result;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::schema::{ConnectMessage, ProxyMessage, SocketReadChannel, WriteMessage};
 use smoltcp::wire::{IpAddress, IpEndpoint};
-use std::str::FromStr;
+
+// SOCKS5 reply codes (RFC 1928)
+const SUCCEEDED: u8 = 0;
+const HOST_UNREACHABLE: u8 = 4;
+const COMMAND_NOT_SUPPORTED: u8 = 7;
+const ADDRESS_TYPE_NOT_SUPPORTED: u8 = 8;
+
+/// Reply with `code` and a 0.0.0.0:0 bound address.
+async fn reply(stream: &mut TcpStream, code: u8) -> Result<()> {
+    stream.write_all(&[5, code, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+    Ok(())
+}
+
+/// Resolve `name` through the tunnel, so lookups don't leak to the host's DNS.
+async fn resolve(proxy_tx: &mpsc::Sender<ProxyMessage>, name: String) -> Result<Option<Ipv4Addr>> {
+    let (resp, result) = oneshot::channel();
+    proxy_tx.send(ProxyMessage::Resolve { name, resp }).await?;
+    Ok(result.await?)
+}
 
 pub async fn run_server(proxy_tx: mpsc::Sender<ProxyMessage>) -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:1080").await?;
@@ -60,65 +78,46 @@ async fn handle_connection(
 
     if command != 1 {
         // We only support CONNECT
-        // Send a "Command not supported" reply
-        let reply = [
-            5, // SOCKS5 version
-            7, // Command not supported
-            0, // Reserved
-            1, // IPv4 address type
-            0, 0, 0, 0, // 0.0.0.0
-            0, 0, // Port 0
-        ];
-        stream.write_all(&reply).await?;
+        reply(&mut stream, COMMAND_NOT_SUPPORTED).await?;
         return Err(anyhow::anyhow!("Unsupported command: {}", command));
     }
 
-    let addr = match atyp {
+    let ip = match atyp {
         1 => {
-            // IPv4
             let mut addr_buf = [0u8; 4];
             stream.read_exact(&mut addr_buf).await?;
-            let port = stream.read_u16().await?;
-            let addr = std::net::Ipv4Addr::from(addr_buf);
-            SocketAddr::new(std::net::IpAddr::V4(addr), port)
+            Ipv4Addr::from(addr_buf)
         }
         3 => {
-            // Domain name
             let len = stream.read_u8().await? as usize;
             let mut domain_buf = vec![0u8; len];
             stream.read_exact(&mut domain_buf).await?;
-            let port = stream.read_u16().await?;
             let domain = String::from_utf8(domain_buf)?;
-            let mut addrs = (domain.as_str(), port).to_socket_addrs()?;
-            addrs
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("Could not resolve domain"))?
+            match resolve(&proxy_tx, domain.clone()).await? {
+                Some(ip) => ip,
+                None => {
+                    reply(&mut stream, HOST_UNREACHABLE).await?;
+                    return Err(anyhow::anyhow!("Could not resolve {domain}"));
+                }
+            }
         }
         4 => {
-            // IPv6
-            let mut addr_buf = [0u8; 16];
-            stream.read_exact(&mut addr_buf).await?;
-            let port = stream.read_u16().await?;
-            let addr = std::net::Ipv6Addr::from(addr_buf);
-            SocketAddr::new(std::net::IpAddr::V6(addr), port)
+            // The tunnel interface is IPv4 only.
+            reply(&mut stream, ADDRESS_TYPE_NOT_SUPPORTED).await?;
+            return Err(anyhow::anyhow!("IPv6 destinations are not supported"));
         }
         _ => {
-            return Err(anyhow::anyhow!("Invalid address type"));
+            reply(&mut stream, ADDRESS_TYPE_NOT_SUPPORTED).await?;
+            return Err(anyhow::anyhow!("Invalid address type {atyp}"));
         }
     };
+    let port = stream.read_u16().await?;
 
     let (resp_tx, resp_rx) = oneshot::channel();
     let (read_tx, mut read_rx) = mpsc::channel::<SocketReadChannel>(100);
 
-    let remote_ip = match addr.ip() {
-        std::net::IpAddr::V4(ipv4) => IpAddress::from_str(&ipv4.to_string())
-            .map_err(|_| anyhow::anyhow!("Invalid IPv4 address"))?,
-        std::net::IpAddr::V6(ipv6) => IpAddress::from_str(&ipv6.to_string())
-            .map_err(|_| anyhow::anyhow!("Invalid IPv6 address"))?,
-    };
-
     let connect_msg = ConnectMessage::TCP {
-        remote: IpEndpoint::new(remote_ip, addr.port()),
+        remote: IpEndpoint::new(IpAddress::Ipv4(ip.into()), port),
         local_port: 0, // Let the engine choose
         connect: true,
         resp: resp_tx,
@@ -132,29 +131,11 @@ async fn handle_connection(
     let handle = match resp_rx.await? {
         Some(handle) => handle,
         None => {
-            // Connection failed
-            let reply = [
-                5, // SOCKS5 version
-                4, // Host unreachable
-                0, // Reserved
-                1, // IPv4 address type
-                0, 0, 0, 0, // 0.0.0.0,
-                0, 0, // Port 0
-            ];
-            stream.write_all(&reply).await?;
-            return Err(anyhow::anyhow!("Connection failed"));
+            reply(&mut stream, HOST_UNREACHABLE).await?;
+            return Err(anyhow::anyhow!("Connection to {ip}:{port} failed"));
         }
     };
-
-    let reply = [
-        5, // SOCKS5 version
-        0, // Success
-        0, // Reserved
-        1, // IPv4 address type
-        0, 0, 0, 0, // 0.0.0.0,
-        0, 0, // Port 0
-    ];
-    stream.write_all(&reply).await?;
+    reply(&mut stream, SUCCEEDED).await?;
 
     let (mut reader, mut writer) = stream.split();
 
@@ -164,6 +145,8 @@ async fn handle_connection(
         loop {
             let n = reader.read(&mut buf).await?;
             if n == 0 {
+                // Client finished sending. Not passed on as a FIN: Proton's server answers a FIN
+                // with a RST, killing the response. Keep relaying the remote's reply instead.
                 return Ok::<(), anyhow::Error>(());
             }
             proxy_tx
@@ -182,6 +165,8 @@ async fn handle_connection(
         while let Some(Some((data, _))) = read_rx.recv().await {
             writer.write_all(&data).await?;
         }
+        // Remote closed (or the connection failed): pass the EOF on, or the client waits forever.
+        writer.shutdown().await?;
         Ok::<(), anyhow::Error>(())
     };
 

@@ -43,7 +43,7 @@ fn load_config() -> Ini {
 struct TestEnv {
     control: mpsc::Sender<ProxyMessage>,
     /// Raw IP packets into boringtun, bypassing the engine.
-    vpn: mpsc::Sender<Vec<u8>>,
+    vpn: mpsc::UnboundedSender<Vec<u8>>,
     /// Copy of every decrypted packet from the tunnel, taken before the engine sees it.
     tap: broadcast::Sender<Vec<u8>>,
 }
@@ -67,7 +67,7 @@ async fn test_env() -> &'static TestEnv {
 async fn start_env() -> TestEnv {
     let conf = load_config();
 
-    let (vpn_sender, vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (vpn_sender, vpn_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
     let (tunnel_sender, mut tunnel_receiver) = mpsc::channel::<Vec<u8>>(100);
     let (device_sender, device_receiver) = mpsc::channel::<Vec<u8>>(100);
     let (control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
@@ -137,7 +137,7 @@ async fn connect(
 /// Wait up to 5 s for one received packet; panic on timeout, EOF or closed channel.
 async fn recv_packet(
     read: &mut mpsc::Receiver<SocketReadChannel>,
-) -> (bytes::Bytes, smoltcp::wire::IpAddress) {
+) -> (bytes::Bytes, smoltcp::wire::IpEndpoint) {
     match tokio::time::timeout(Duration::from_secs(5), read.recv()).await {
         Ok(Some(Some(packet))) => packet,
         Ok(Some(None)) => panic!("got EOF instead of data"),

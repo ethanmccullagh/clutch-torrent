@@ -19,20 +19,32 @@ use crate::schema::ProxyMessage;
 
 #[tokio::main]
 async fn main() {
-    //load config file from path
-    let conf = Ini::load_from_file("../cachy3-CA-1208.conf")
-        .expect("failed to load WireGuard config ../cachy3-CA-1208.conf");
+    // Usage: native [config.conf]
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "cachy3-CA-1208.conf".to_string());
+    let conf = Ini::load_from_file(&config_path)
+        .unwrap_or_else(|e| panic!("failed to load WireGuard config {config_path}: {e}"));
 
     //Communication channels for sync engine <--> async tasks
-    let (vpn_sender, vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (vpn_sender, vpn_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
     let (device_sender, device_receiver) = mpsc::channel::<Vec<u8>>(100);
-    let (_control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
+    let (control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
 
     //setup and start vpn tunnel tasks
     let (tunn, endpoint) = setup_tunnel(conf.clone());
-    let _boring_handles = spawn_boring_threads(tunn, endpoint, vpn_receiver, device_sender.clone())
+    let _boring_handles = spawn_boring_threads(tunn, endpoint, vpn_receiver, device_sender)
         .await
         .expect("failed to bind UDP socket for the WireGuard tunnel");
 
-    run_engine(conf, device_receiver, vpn_sender, control_receiver).await;
+    tokio::select! {
+        _ = run_engine(conf, device_receiver, vpn_sender, control_receiver) => {
+            eprintln!("engine stopped");
+        }
+        result = socks5::run_server(control_sender) => {
+            if let Err(e) = result {
+                eprintln!("SOCKS5 server failed: {e}");
+            }
+        }
+    }
 }

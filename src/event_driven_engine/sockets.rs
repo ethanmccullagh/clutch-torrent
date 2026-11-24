@@ -1,20 +1,24 @@
 use super::device::{QueueDevice, MTU};
 use crate::schema::{ConnectMessage, SocketReadChannel, WriteMessage};
-use crate::setup::setup_engine;
+use crate::setup::{dns_server, setup_engine};
 use bytes::Bytes;
 use ini::Ini;
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, Tracer};
 use smoltcp::socket::tcp::State;
-use smoltcp::socket::{icmp, tcp, udp, Socket};
+use smoltcp::socket::{dns, icmp, tcp, udp, Socket};
 use smoltcp::time::{Duration, Instant};
-use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress, IpEndpoint, IpListenEndpoint};
-use std::collections::{HashMap, VecDeque};
-use tokio::sync::mpsc;
+use smoltcp::wire::{
+    DnsQueryType, Icmpv4Packet, Icmpv4Repr, IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address,
+};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::Ipv4Addr;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
-const TCP_BUFFER_SIZE: usize = 256;
+// Each direction; caps the TCP window, so too small throttles every connection.
+const TCP_BUFFER_SIZE: usize = 64 * 1024;
 // UDP/ICMP buffers must hold one full-MTU packet; smaller ones silently drop bigger datagrams.
 const UDP_BUFFER_SIZE: usize = MTU;
 const ICMP_BUFFER_SIZE: usize = MTU;
@@ -32,6 +36,19 @@ struct Connection {
     /// Wakes the engine when the reader drops its end, so the socket gets closed.
     closed_watch: AbortHandle,
     eof_sent: bool,
+    /// Ephemeral port picked by the engine, freed when the socket is removed.
+    ephemeral_port: Option<u16>,
+    /// Outgoing TCP: the Connect reply, held until the handshake succeeds or fails.
+    connecting: Option<oneshot::Sender<Option<SocketHandle>>>,
+    kind: Kind,
+}
+
+/// Which smoltcp socket a handle refers to; `SocketSet::get_mut` panics on the wrong type.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    Tcp,
+    Udp,
+    Icmp,
 }
 
 impl Connection {
@@ -39,6 +56,8 @@ impl Connection {
         read: mpsc::Sender<SocketReadChannel>,
         handle: SocketHandle,
         wake: &mpsc::UnboundedSender<SocketHandle>,
+        ephemeral_port: Option<u16>,
+        kind: Kind,
     ) -> Self {
         let (watch_read, wake) = (read.clone(), wake.clone());
         let closed_watch = tokio::spawn(async move {
@@ -52,6 +71,9 @@ impl Connection {
             blocked: None,
             closed_watch,
             eof_sent: false,
+            ephemeral_port,
+            connecting: None,
+            kind,
         }
     }
 
@@ -83,21 +105,33 @@ pub struct Engine {
     sockets: SocketSet<'static>,
     connections: HashMap<SocketHandle, Connection>,
     wake: mpsc::UnboundedSender<SocketHandle>,
+    /// Ephemeral ports in use, so two sockets never get the same one.
+    used_ports: HashSet<u16>,
+    /// The VPN gateway (the config's DNS server), which also answers NAT-PMP.
+    gateway: Ipv4Address,
+    dns: SocketHandle,
+    dns_queries: Vec<(dns::QueryHandle, oneshot::Sender<Option<Ipv4Addr>>)>,
 }
 
 impl Engine {
     pub fn new(
         conf: Ini,
-        vpn_sender: mpsc::Sender<Vec<u8>>,
+        vpn_sender: mpsc::UnboundedSender<Vec<u8>>,
         wake: mpsc::UnboundedSender<SocketHandle>,
     ) -> Self {
-        let (iface, device, sockets) = setup_engine(conf, QueueDevice::new(vpn_sender));
+        let gateway = dns_server(&conf);
+        let (iface, device, mut sockets) = setup_engine(conf, QueueDevice::new(vpn_sender));
+        let dns = sockets.add(dns::Socket::new(&[IpAddress::Ipv4(gateway)], vec![]));
         Self {
             iface,
             device,
             sockets,
             connections: HashMap::new(),
             wake,
+            used_ports: HashSet::new(),
+            gateway,
+            dns,
+            dns_queries: Vec::new(),
         }
     }
 
@@ -124,7 +158,10 @@ impl Engine {
     pub fn service(&mut self) {
         loop {
             // `|` not `||`: both must run every pass.
-            let moved = self.flush_writes() | self.drain_reads();
+            let moved = self.flush_writes()
+                | self.drain_reads()
+                | self.finish_queries()
+                | self.finish_connects();
             let changed = self
                 .iface
                 .poll(Instant::now(), &mut self.device, &mut self.sockets);
@@ -205,9 +242,12 @@ impl Engine {
                 let item = match socket {
                     Socket::Tcp(sock) => {
                         if sock.can_recv() {
-                            sock.recv_slice(&mut buf).ok().map(|n| {
-                                Some((Bytes::copy_from_slice(&buf[..n]), IpAddress::v4(0, 0, 0, 0)))
-                            })
+                            let from = sock
+                                .remote_endpoint()
+                                .unwrap_or(IpEndpoint::new(IpAddress::v4(0, 0, 0, 0), 0));
+                            sock.recv_slice(&mut buf)
+                                .ok()
+                                .map(|n| Some((Bytes::copy_from_slice(&buf[..n]), from)))
                         } else if !conn.eof_sent
                             && !sock.may_recv()
                             && !matches!(
@@ -221,13 +261,24 @@ impl Engine {
                             None
                         }
                     }
-                    Socket::Udp(sock) => sock.recv_slice(&mut buf).ok().map(|(n, meta)| {
-                        Some((Bytes::copy_from_slice(&buf[..n]), meta.endpoint.addr))
-                    }),
-                    Socket::Icmp(sock) => sock
-                        .recv()
+                    Socket::Udp(sock) => sock
+                        .recv_slice(&mut buf)
                         .ok()
-                        .map(|(data, addr)| Some((Bytes::copy_from_slice(data), addr))),
+                        .map(|(n, meta)| Some((Bytes::copy_from_slice(&buf[..n]), meta.endpoint))),
+                    Socket::Icmp(sock) => loop {
+                        match sock.recv() {
+                            // Echo requests (e.g. the server's MTU probes) are answered by smoltcp
+                            // itself; readers only want replies and errors.
+                            Ok((data, _)) if data.first() == Some(&8) => continue,
+                            Ok((data, addr)) => {
+                                break Some(Some((
+                                    Bytes::copy_from_slice(data),
+                                    IpEndpoint::new(addr, 0),
+                                )))
+                            }
+                            Err(_) => break None,
+                        }
+                    },
                     _ => None,
                 };
                 match item {
@@ -246,13 +297,20 @@ impl Engine {
         for handle in dead {
             eprintln!("Socket {} reader gone, pruned", handle);
             self.sockets.remove(handle);
-            self.connections.remove(&handle);
+            if let Some(port) = self
+                .connections
+                .remove(&handle)
+                .and_then(|c| c.ephemeral_port)
+            {
+                self.used_ports.remove(&port);
+            }
         }
         moved
     }
 
     pub fn connect(&mut self, msg: ConnectMessage) {
-        let (handle, resp, read) = match msg {
+        let mut wait_for_handshake = false;
+        let (handle, resp, read, port, kind) = match msg {
             ConnectMessage::UDP {
                 local_port,
                 resp,
@@ -268,20 +326,20 @@ impl Engine {
                 );
                 let mut socket = udp::Socket::new(rx_buffer, tx_buffer);
 
-                let port = if local_port == 0 {
-                    get_ephemeral_port()
-                } else {
-                    local_port
+                let Some(port) = self.pick_port(local_port) else {
+                    eprintln!("no free ephemeral port");
+                    let _ = resp.send(None);
+                    return;
                 };
                 if let Err(e) = socket.bind(IpListenEndpoint {
-                    addr: Some(IpAddress::v4(10, 2, 0, 2)),
+                    addr: self.iface.ipv4_addr().map(IpAddress::Ipv4),
                     port,
                 }) {
                     eprintln!("smoltcp UDP bind error: {}", e);
                     let _ = resp.send(None);
                     return;
                 }
-                (self.sockets.add(socket), resp, read)
+                (self.sockets.add(socket), resp, read, Some(port), Kind::Udp)
             }
             ConnectMessage::TCP {
                 remote,
@@ -290,15 +348,21 @@ impl Engine {
                 resp,
                 read,
             } => {
+                // The interface has no IPv6 address; smoltcp panics if asked to send from one.
+                if !matches!(remote.addr, IpAddress::Ipv4(_)) {
+                    eprintln!("TCP connect to {remote} refused: only IPv4 is supported");
+                    let _ = resp.send(None);
+                    return;
+                }
                 let rx_buffer = tcp::SocketBuffer::new(vec![0; TCP_BUFFER_SIZE]);
                 let tx_buffer = tcp::SocketBuffer::new(vec![0; TCP_BUFFER_SIZE]);
                 let mut socket = tcp::Socket::new(rx_buffer, tx_buffer);
                 socket.set_timeout(Some(TCP_TIMEOUT));
 
-                let port = if local_port == 0 {
-                    get_ephemeral_port()
-                } else {
-                    local_port
+                let Some(port) = self.pick_port(local_port) else {
+                    eprintln!("no free ephemeral port");
+                    let _ = resp.send(None);
+                    return;
                 };
                 let result = if connect {
                     socket
@@ -314,7 +378,8 @@ impl Engine {
                     let _ = resp.send(None);
                     return;
                 }
-                (self.sockets.add(socket), resp, read)
+                wait_for_handshake = connect;
+                (self.sockets.add(socket), resp, read, Some(port), Kind::Tcp)
             }
             ConnectMessage::ICMP { resp, read } => {
                 let rx_buffer = icmp::PacketBuffer::new(
@@ -326,27 +391,117 @@ impl Engine {
                     vec![0; ICMP_BUFFER_SIZE],
                 );
                 let socket = icmp::Socket::new(rx_buffer, tx_buffer);
-                (self.sockets.add(socket), resp, read)
+                (self.sockets.add(socket), resp, read, None, Kind::Icmp)
             }
         };
 
-        self.connections
-            .insert(handle, Connection::new(read, handle, &self.wake));
-        let _ = resp.send(Some(handle));
+        // Only engine-picked ports are tracked; callers asking for a fixed port manage it themselves.
+        let ephemeral = port.filter(|p| self.used_ports.insert(*p));
+        let mut conn = Connection::new(read, handle, &self.wake, ephemeral, kind);
+        if wait_for_handshake {
+            conn.connecting = Some(resp);
+        } else {
+            let _ = resp.send(Some(handle));
+        }
+        self.connections.insert(handle, conn);
+    }
+
+    /// Answer outgoing TCP connects whose handshake finished: the handle if it was established,
+    /// `None` if it was refused or timed out.
+    fn finish_connects(&mut self) -> bool {
+        let mut moved = false;
+        for (handle, conn) in self.connections.iter_mut() {
+            if conn.connecting.is_none() {
+                continue;
+            }
+            let result = match self.sockets.get::<tcp::Socket>(*handle).state() {
+                State::SynSent | State::SynReceived => continue,
+                State::Closed => None,
+                // Established, or already closing after the peer sent data and a FIN.
+                _ => Some(*handle),
+            };
+            if let Some(resp) = conn.connecting.take() {
+                let _ = resp.send(result);
+                moved = true;
+            }
+        }
+        moved
+    }
+
+    /// `requested`, or a free ephemeral port if it is 0. `None` if every ephemeral port is taken.
+    fn pick_port(&self, requested: u16) -> Option<u16> {
+        if requested != 0 {
+            return Some(requested);
+        }
+        if self.used_ports.len() >= EPHEMERAL_PORTS.len() {
+            return None;
+        }
+        loop {
+            let port = rand::random_range(EPHEMERAL_PORTS);
+            if !self.used_ports.contains(&port) {
+                return Some(port);
+            }
+        }
+    }
+
+    pub fn resolve(&mut self, name: &str, resp: oneshot::Sender<Option<Ipv4Addr>>) {
+        // smoltcp sends .local names as mDNS, including to an IPv6 multicast address we can't send from.
+        if name.trim_end_matches('.').ends_with(".local") {
+            let _ = resp.send(None);
+            return;
+        }
+        let socket = self.sockets.get_mut::<dns::Socket>(self.dns);
+        match socket.start_query(self.iface.context(), name, DnsQueryType::A) {
+            Ok(query) => self.dns_queries.push((query, resp)),
+            Err(e) => {
+                eprintln!("DNS query for {name:?} not started: {e}");
+                let _ = resp.send(None);
+            }
+        }
+    }
+
+    /// Answer DNS queries that have finished (smoltcp retries and times them out itself).
+    fn finish_queries(&mut self) -> bool {
+        let socket = self.sockets.get_mut::<dns::Socket>(self.dns);
+        let mut moved = false;
+        for i in (0..self.dns_queries.len()).rev() {
+            let (query, resp) = &self.dns_queries[i];
+            let result = match socket.get_query_result(*query) {
+                Err(dns::GetQueryResultError::Pending) if !resp.is_closed() => continue,
+                Err(dns::GetQueryResultError::Pending) => {
+                    socket.cancel_query(*query); // requester gave up
+                    None
+                }
+                Err(dns::GetQueryResultError::Failed) => None,
+                Ok(addrs) => addrs.iter().find_map(|a| match a {
+                    IpAddress::Ipv4(v4) => Some(Ipv4Addr::from(v4.0)),
+                    _ => None,
+                }),
+            };
+            let (_, resp) = self.dns_queries.swap_remove(i);
+            let _ = resp.send(result);
+            moved = true;
+        }
+        moved
     }
 
     pub fn write(&mut self, msg: WriteMessage) {
-        let handle = match &msg {
-            WriteMessage::TCP { handle, .. }
-            | WriteMessage::UDP { handle, .. }
-            | WriteMessage::ICMP { handle, .. }
-            | WriteMessage::NAT { handle, .. } => *handle,
+        let (handle, kind) = match &msg {
+            WriteMessage::TCP { handle, .. } => (*handle, Kind::Tcp),
+            WriteMessage::UDP { handle, .. } | WriteMessage::NAT { handle, .. } => {
+                (*handle, Kind::Udp)
+            }
+            WriteMessage::ICMP { handle, .. } => (*handle, Kind::Icmp),
         };
-        // SocketSet::get_mut panics on a removed handle.
+        // SocketSet::get_mut panics on a removed handle or the wrong socket type.
         let Some(conn) = self.connections.get_mut(&handle) else {
             eprintln!("Write to unknown socket {}, dropped", handle);
             return;
         };
+        if conn.kind != kind {
+            eprintln!("{kind:?} write to {:?} socket {handle}, dropped", conn.kind);
+            return;
+        }
 
         match msg {
             WriteMessage::TCP { data, .. } => conn.pending.push_back(data),
@@ -368,10 +523,12 @@ impl Engine {
             } => {
                 let checksum = self.device.capabilities().checksum;
                 let socket = self.sockets.get_mut::<icmp::Socket>(handle);
+                // Bound to the first write's ident; replies to other idents won't reach this socket.
                 if !socket.is_open() {
-                    socket
-                        .bind(icmp::Endpoint::Ident(0x1234))
-                        .expect("binding a closed ICMP socket to a nonzero ident cannot fail");
+                    if let Err(e) = socket.bind(icmp::Endpoint::Ident(ident)) {
+                        eprintln!("ICMP socket {handle} bind to ident {ident} failed: {e}");
+                        return;
+                    }
                 }
                 let repr = Icmpv4Repr::EchoRequest {
                     ident,
@@ -386,7 +543,7 @@ impl Engine {
             }
             WriteMessage::NAT { opcode, .. } => {
                 let socket = self.sockets.get_mut::<udp::Socket>(handle);
-                let remote = IpEndpoint::new(IpAddress::v4(10, 2, 0, 1), 5351);
+                let remote = IpEndpoint::new(IpAddress::Ipv4(self.gateway), 5351);
                 let port: [u8; 2] = socket.endpoint().port.to_be_bytes();
                 let data = [
                     //V  Op      Reserved  IntPort           ExtPort   Lifetime
@@ -400,6 +557,4 @@ impl Engine {
     }
 }
 
-fn get_ephemeral_port() -> u16 {
-    49152 + (rand::random::<u16>() % 16384)
-}
+const EPHEMERAL_PORTS: std::ops::RangeInclusive<u16> = 49152..=65535;

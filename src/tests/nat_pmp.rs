@@ -1,7 +1,7 @@
 use super::*;
 use crate::schema::WriteMessage;
 use bytes::Bytes;
-use smoltcp::wire::IpAddress;
+use smoltcp::wire::{IpAddress, IpEndpoint};
 
 /// Send a NAT-PMP request from a UDP socket on `local_port` to the VPN gateway.
 /// Returns the reply after checking the header every reply shares.
@@ -24,7 +24,11 @@ async fn request(local_port: u16, opcode: u8) -> Bytes {
 
     let (reply, from) = recv_packet(&mut read).await;
 
-    assert_eq!(from, IpAddress::v4(10, 2, 0, 1), "reply not from gateway");
+    assert_eq!(
+        from,
+        IpEndpoint::new(IpAddress::v4(10, 2, 0, 1), 5351),
+        "reply not from gateway"
+    );
     assert_eq!(reply[0], 0, "NAT-PMP version");
     assert_eq!(reply[1], 128 + opcode, "reply opcode");
     assert_eq!(
