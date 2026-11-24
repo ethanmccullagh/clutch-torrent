@@ -7,7 +7,8 @@ use crate::schema::WriteMessage;
 async fn echo() {
     let _tunnel = lock_tunnel().await;
     let control = start_test_environment().await;
-    let (handle, mut read) = connect(&control, |resp, read| ConnectMessage::ICMP { resp, read }).await;
+    let (handle, mut read) =
+        connect(&control, |resp, read| ConnectMessage::ICMP { resp, read }).await;
 
     control
         .send(ProxyMessage::Write {
@@ -22,7 +23,10 @@ async fn echo() {
         .unwrap();
 
     let (data, from) = recv_packet(&mut read).await;
-    assert!(parse_and_print_icmp_noip(&data, from), "ICMP response failed");
+    assert!(
+        parse_and_print_icmp_noip(&data, from),
+        "ICMP response failed"
+    );
 
     control.send(ProxyMessage::Close).await.unwrap();
 }

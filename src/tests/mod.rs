@@ -31,7 +31,8 @@ async fn lock_tunnel() -> MutexGuard<'static, ()> {
 }
 
 fn load_config() -> Ini {
-    let path = std::env::var("WG_CONFIG_PATH").unwrap_or_else(|_| "cachy3-CA-1208.conf".to_string());
+    let path =
+        std::env::var("WG_CONFIG_PATH").unwrap_or_else(|_| "cachy3-CA-1208.conf".to_string());
     Ini::load_from_file(path).expect("Failed to load WG config for testing")
 }
 
@@ -48,7 +49,12 @@ async fn start_test_environment() -> mpsc::Sender<ProxyMessage> {
         .await
         .expect("Failed to spawn boring threads");
 
-    tokio::spawn(run_engine(conf, device_receiver, vpn_sender, control_receiver));
+    tokio::spawn(run_engine(
+        conf,
+        device_receiver,
+        vpn_sender,
+        control_receiver,
+    ));
 
     let server_control = control_sender.clone();
     tokio::spawn(async move {
@@ -64,19 +70,26 @@ async fn start_test_environment() -> mpsc::Sender<ProxyMessage> {
 /// Send a Connect message; return the socket handle and its read channel.
 async fn connect(
     control: &mpsc::Sender<ProxyMessage>,
-    make: impl FnOnce(oneshot::Sender<Option<SocketHandle>>, mpsc::Sender<SocketReadChannel>) -> ConnectMessage,
+    make: impl FnOnce(
+        oneshot::Sender<Option<SocketHandle>>,
+        mpsc::Sender<SocketReadChannel>,
+    ) -> ConnectMessage,
 ) -> (SocketHandle, mpsc::Receiver<SocketReadChannel>) {
     let (resp, handle) = oneshot::channel();
     let (read_tx, read) = mpsc::channel::<SocketReadChannel>(10);
     control
-        .send(ProxyMessage::Connect { msg: make(resp, read_tx) })
+        .send(ProxyMessage::Connect {
+            msg: make(resp, read_tx),
+        })
         .await
         .unwrap();
     (handle.await.unwrap().expect("socket creation failed"), read)
 }
 
 /// Wait up to 5 s for one received packet; panic on timeout, EOF or closed channel.
-async fn recv_packet(read: &mut mpsc::Receiver<SocketReadChannel>) -> (bytes::Bytes, smoltcp::wire::IpAddress) {
+async fn recv_packet(
+    read: &mut mpsc::Receiver<SocketReadChannel>,
+) -> (bytes::Bytes, smoltcp::wire::IpAddress) {
     match tokio::time::timeout(Duration::from_secs(5), read.recv()).await {
         Ok(Some(Some(packet))) => packet,
         Ok(Some(None)) => panic!("got EOF instead of data"),

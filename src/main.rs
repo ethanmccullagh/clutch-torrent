@@ -20,7 +20,8 @@ use crate::schema::ProxyMessage;
 #[tokio::main]
 async fn main() {
     //load config file from path
-    let conf = Ini::load_from_file("../cachy3-CA-1208.conf").unwrap();
+    let conf = Ini::load_from_file("../cachy3-CA-1208.conf")
+        .expect("failed to load WireGuard config ../cachy3-CA-1208.conf");
 
     //Communication channels for sync engine <--> async tasks
     let (vpn_sender, vpn_receiver) = mpsc::channel::<Vec<u8>>(100);
@@ -31,7 +32,7 @@ async fn main() {
     let (tunn, endpoint) = setup_tunnel(conf.clone());
     let _boring_handles = spawn_boring_threads(tunn, endpoint, vpn_receiver, device_sender.clone())
         .await
-        .unwrap();
+        .expect("failed to bind UDP socket for the WireGuard tunnel");
 
     run_engine(conf, device_receiver, vpn_sender, control_receiver).await;
 }

@@ -18,7 +18,10 @@ async fn handshake() -> TcpStream {
 async fn request(stream: &mut TcpStream, request: &[u8]) -> u8 {
     stream.write_all(request).await.unwrap();
     let mut reply = [0u8; 10];
-    stream.read_exact(&mut reply).await.expect("no SOCKS5 reply");
+    stream
+        .read_exact(&mut reply)
+        .await
+        .expect("no SOCKS5 reply");
     assert_eq!(reply[0], 5, "SOCKS5 reply version");
     reply[1]
 }
@@ -88,7 +91,11 @@ async fn unresolvable_domain() {
     let control = start_test_environment().await;
     let mut stream = handshake().await;
 
-    let code = request(&mut stream, &domain_connect("unresolvable.domain.for.test", 80)).await;
+    let code = request(
+        &mut stream,
+        &domain_connect("unresolvable.domain.for.test", 80),
+    )
+    .await;
     assert_eq!(code, 4, "expected 'Host unreachable'");
 
     control.send(ProxyMessage::Close).await.unwrap();

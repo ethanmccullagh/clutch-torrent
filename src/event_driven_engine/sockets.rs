@@ -209,7 +209,10 @@ impl Engine {
                             })
                         } else if !conn.eof_sent
                             && !sock.may_recv()
-                            && !matches!(sock.state(), State::Listen | State::SynSent | State::SynReceived)
+                            && !matches!(
+                                sock.state(),
+                                State::Listen | State::SynSent | State::SynReceived
+                            )
                         {
                             conn.eof_sent = true;
                             Some(None)
@@ -353,7 +356,8 @@ impl Engine {
                 ..
             } => {
                 let socket = self.sockets.get_mut::<udp::Socket>(handle);
-                let remote = IpEndpoint::new(IpAddress::v4(dst[0], dst[1], dst[2], dst[3]), dst_port);
+                let remote =
+                    IpEndpoint::new(IpAddress::v4(dst[0], dst[1], dst[2], dst[3]), dst_port);
                 if let Err(e) = socket.send_slice(&data, remote) {
                     eprintln!("UDP socket {} send error: {}", handle, e);
                 }
@@ -364,7 +368,9 @@ impl Engine {
                 let checksum = self.device.capabilities().checksum;
                 let socket = self.sockets.get_mut::<icmp::Socket>(handle);
                 if !socket.is_open() {
-                    socket.bind(icmp::Endpoint::Ident(0x1234)).unwrap();
+                    socket
+                        .bind(icmp::Endpoint::Ident(0x1234))
+                        .expect("binding a closed ICMP socket to a nonzero ident cannot fail");
                 }
                 let repr = Icmpv4Repr::EchoRequest {
                     ident,

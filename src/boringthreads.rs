@@ -50,7 +50,14 @@ async fn udp_recv_task(
 
     loop {
         //println!("-->RECEIVE: waiting");
-        if let Ok((len, addr)) = socket.recv_from(&mut buffer).await {
+        let (len, addr) = match socket.recv_from(&mut buffer).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("WireGuard UDP recv error: {e}");
+                continue;
+            }
+        };
+        {
             //println!("-->BORING RECEIVE: packet received from network");
 
             if addr != endpoint {
@@ -68,7 +75,9 @@ async fn udp_recv_task(
                     }
                     TunnResult::WriteToNetwork(b) => {
                         //print_packet(b);
-                        let _ = socket.send_to(b, addr).await;
+                        if let Err(e) = socket.send_to(b, addr).await {
+                            eprintln!("WireGuard UDP send to {addr} failed: {e}");
+                        }
 
                         //println!("-->Boring RECEIVE: packet sent to network");
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);
@@ -82,17 +91,19 @@ async fn udp_recv_task(
                         //     parse_and_print_tcp(&b);
                         // }
 
-                        let _ = sender.send(b.to_vec()).await;
+                        if sender.send(b.to_vec()).await.is_err() {
+                            eprintln!("engine channel closed, stopping WireGuard receive task");
+                            return;
+                        }
                         //println!("-->BORING RECEIVE: packet sent to channel");
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);
                     }
                     TunnResult::Err(e) => {
-                        println!("-->RECEIVE: Error!");
-                        println!("{:?}", e);
+                        eprintln!("WireGuard decapsulate error: {e:?}");
                         break;
                     }
-                    _ => {
-                        println!("-->RECEIVE: Error!");
+                    TunnResult::WriteToTunnelV6(..) => {
+                        eprintln!("dropping IPv6 packet from tunnel: interface is IPv4 only");
                         break;
                     }
                 }
@@ -112,17 +123,24 @@ async fn udp_transmit_task(
     let mut buffer = [0u8; 4096];
     loop {
         //println!("-->TRANSMIT: waiting");
-        if let Some(msg) = receiver.recv().await {
+        // None means the engine dropped its sender; looping on it would spin forever.
+        let Some(msg) = receiver.recv().await else {
+            eprintln!("engine channel closed, stopping WireGuard transmit task");
+            return;
+        };
+        {
             //println!("-->BORING TRANSMIT: packet received from channel");
 
             let mut tunn = t.lock().await;
 
             match tunn.encapsulate(msg.as_slice(), &mut buffer) {
                 TunnResult::WriteToNetwork(encrypted_bytes) => {
-                    let _ = socket.send_to(encrypted_bytes, &endpoint).await;
+                    if let Err(e) = socket.send_to(encrypted_bytes, &endpoint).await {
+                        eprintln!("WireGuard UDP send to {endpoint} failed: {e}");
+                    }
                     //println!("-->BORING TRANSMIT: packet sent to network");
                 }
-                TunnResult::Err(e) => println!("BORING Tunnel encap error {:?}", e),
+                TunnResult::Err(e) => eprintln!("WireGuard encapsulate error: {e:?}"),
                 _ => {}
             }
 

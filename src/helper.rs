@@ -20,7 +20,9 @@ pub fn create_icmp_packet(src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
 
     let payload = b"Hello ProtonVPN";
     let mut result = Vec::with_capacity(builder.size(payload.len()));
-    builder.write(&mut result, payload).unwrap();
+    builder
+        .write(&mut result, payload)
+        .expect("writing an ICMP packet into a Vec cannot fail");
     result
 }
 
