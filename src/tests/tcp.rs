@@ -30,6 +30,4 @@ async fn echo() {
 
     let (data, _) = recv_packet(&mut read).await;
     assert_eq!(&data[..], b"Hello TCP\n");
-
-    control.send(ProxyMessage::Close).await.unwrap();
 }

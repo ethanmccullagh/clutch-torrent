@@ -3,6 +3,10 @@ use smoltcp::time::Instant;
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
 
+/// Inner MTU: 1500 minus WireGuard overhead (32) and the outer UDP (8) and IPv6 (40) headers,
+/// the wg-quick default. Larger packets get fragmented or dropped on a standard 1500 path.
+pub const MTU: usize = 1420;
+
 /// smoltcp device backed by channels. The engine owns the tunnel receiver (so it can await it)
 /// and pushes received packets into `inbox` before polling.
 pub struct QueueDevice {
@@ -48,7 +52,7 @@ impl Device for QueueDevice {
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
-        caps.max_transmission_unit = 1500;
+        caps.max_transmission_unit = MTU;
         caps.medium = Medium::Ip;
         caps.checksum.icmpv4 = Checksum::Tx;
         caps

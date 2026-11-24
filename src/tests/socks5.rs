@@ -38,7 +38,7 @@ fn domain_connect(domain: &str, port: u16) -> Vec<u8> {
 #[tokio::test]
 async fn echo_4kb() {
     let _tunnel = lock_tunnel().await;
-    let control = start_test_environment().await;
+    test_env().await; // starts the shared SOCKS5 server
     let mut stream = handshake().await;
 
     // CONNECT 45.79.112.203:4242
@@ -55,40 +55,34 @@ async fn echo_4kb() {
         .expect("SOCKS5 echo timed out")
         .unwrap();
     assert!(echoed == payload, "SOCKS5 echo mismatch");
-
-    control.send(ProxyMessage::Close).await.unwrap();
 }
 
 #[tokio::test]
 #[ignore = "bug: socks5.rs connects to the first resolved address; an IPv6 one panics smoltcp (no IPv6 source address)"]
 async fn connect_by_domain() {
     let _tunnel = lock_tunnel().await;
-    let control = start_test_environment().await;
+    test_env().await; // starts the shared SOCKS5 server
     let mut stream = handshake().await;
 
     let code = request(&mut stream, &domain_connect("www.google.com", 80)).await;
     assert_eq!(code, 0, "SOCKS5 CONNECT failed");
-
-    control.send(ProxyMessage::Close).await.unwrap();
 }
 
 #[tokio::test]
 async fn bind_is_unsupported() {
     let _tunnel = lock_tunnel().await;
-    let control = start_test_environment().await;
+    test_env().await; // starts the shared SOCKS5 server
     let mut stream = handshake().await;
 
     let code = request(&mut stream, &[5, 2, 0, 1, 0, 0, 0, 0, 0, 0]).await;
     assert_eq!(code, 7, "expected 'Command not supported'");
-
-    control.send(ProxyMessage::Close).await.unwrap();
 }
 
 #[tokio::test]
 #[ignore = "bug: socks5.rs closes the connection on DNS failure instead of replying 4"]
 async fn unresolvable_domain() {
     let _tunnel = lock_tunnel().await;
-    let control = start_test_environment().await;
+    test_env().await; // starts the shared SOCKS5 server
     let mut stream = handshake().await;
 
     let code = request(
@@ -97,6 +91,4 @@ async fn unresolvable_domain() {
     )
     .await;
     assert_eq!(code, 4, "expected 'Host unreachable'");
-
-    control.send(ProxyMessage::Close).await.unwrap();
 }

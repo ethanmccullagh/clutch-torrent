@@ -38,6 +38,39 @@ async fn dns_query() {
     assert!(reply[2] & 0x80 != 0, "not a DNS response");
     assert_eq!(reply[3] & 0x0F, 0, "DNS error rcode");
     assert!(u16::from_be_bytes([reply[6], reply[7]]) > 0, "no answers");
+}
 
-    control.send(ProxyMessage::Close).await.unwrap();
+/// A UDP reply larger than 256 bytes (the old socket buffer size) must reach the reader.
+#[tokio::test]
+async fn large_reply() {
+    let _tunnel = lock_tunnel().await;
+    let control = start_test_environment().await;
+    let (handle, mut read) = connect(&control, |resp, read| ConnectMessage::UDP {
+        local_port: 0,
+        resp,
+        read,
+    })
+    .await;
+
+    // DNS query: google.com TXT IN, plus an EDNS OPT record allowing 1232-byte replies
+    // (without it the answer exceeds 512 bytes and comes back empty and truncated).
+    let mut query = vec![0xBE, 0xEF, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 1];
+    query.extend_from_slice(b"\x06google\x03com\x00");
+    query.extend_from_slice(&[0, 16, 0, 1]);
+    query.extend_from_slice(&[0, 0, 41, 0x04, 0xD0, 0, 0, 0, 0, 0, 0]);
+
+    control
+        .send(ProxyMessage::Write {
+            msg: WriteMessage::UDP {
+                handle,
+                data: Bytes::from(query),
+                dst: [8, 8, 8, 8],
+                dst_port: 53,
+            },
+        })
+        .await
+        .unwrap();
+
+    let (reply, _) = recv_packet(&mut read).await;
+    assert!(reply.len() > 256, "reply only {} bytes", reply.len());
 }

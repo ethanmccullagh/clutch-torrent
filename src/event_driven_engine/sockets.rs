@@ -1,4 +1,4 @@
-use super::device::QueueDevice;
+use super::device::{QueueDevice, MTU};
 use crate::schema::{ConnectMessage, SocketReadChannel, WriteMessage};
 use crate::setup::setup_engine;
 use bytes::Bytes;
@@ -15,8 +15,9 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::task::AbortHandle;
 
 const TCP_BUFFER_SIZE: usize = 256;
-const UDP_BUFFER_SIZE: usize = 256;
-const ICMP_BUFFER_SIZE: usize = 256;
+// UDP/ICMP buffers must hold one full-MTU packet; smaller ones silently drop bigger datagrams.
+const UDP_BUFFER_SIZE: usize = MTU;
+const ICMP_BUFFER_SIZE: usize = MTU;
 const READ_CHUNK: usize = 2048;
 // Without a timeout, a closing socket whose peer vanished retransmits its FIN forever and is never pruned.
 const TCP_TIMEOUT: Duration = Duration::from_secs(60);

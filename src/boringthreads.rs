@@ -1,4 +1,5 @@
 use anyhow::Result;
+use boringtun::noise::errors::WireGuardError;
 use boringtun::noise::{Tunn, TunnResult};
 use core::net::SocketAddr;
 use std::sync::Arc;
@@ -17,8 +18,11 @@ pub async fn spawn_boring_threads(
     let tunn1 = Arc::new(Mutex::new(tunn));
     let tunn2 = tunn1.clone();
 
+    let tunn3 = tunn1.clone();
+
     let socket_r = Arc::new(udp_socket);
     let socket_s = socket_r.clone();
+    let socket_t = socket_r.clone();
 
     let th1 = tokio::spawn(udp_recv_task(
         socket_r,
@@ -33,9 +37,12 @@ pub async fn spawn_boring_threads(
         tunn2,
     ));
 
+    let th3 = tokio::spawn(timer_task(socket_t, endpoint, tunn3));
+
     let mut task_handles = Vec::new();
     task_handles.push(th1);
     task_handles.push(th2);
+    task_handles.push(th3);
     Ok(task_handles)
 }
 
@@ -80,6 +87,8 @@ async fn udp_recv_task(
                         }
 
                         //println!("-->Boring RECEIVE: packet sent to network");
+
+                        //loopback to keep unpacking
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);
                     }
                     TunnResult::WriteToTunnelV4(b, _) => {
@@ -96,6 +105,8 @@ async fn udp_recv_task(
                             return;
                         }
                         //println!("-->BORING RECEIVE: packet sent to channel");
+
+                        //loopback to keep unpacking
                         result = tunn.decapsulate(None, &[], &mut decrypted_buf);
                     }
                     TunnResult::Err(e) => {
@@ -145,6 +156,37 @@ async fn udp_transmit_task(
             }
 
             drop(tunn);
+        }
+    }
+}
+
+/// Drive boringtun's timers: keepalives, rekeys and handshake retransmits. Without this a
+/// session is never renewed and the server rejects it after about 3 minutes.
+async fn timer_task(socket: Arc<UdpSocket>, endpoint: SocketAddr, t: Arc<Mutex<Tunn>>) {
+    // Same tick as boringtun's own device.
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    let mut buffer = [0u8; 4096];
+    let mut expired = false;
+    loop {
+        tick.tick().await;
+        let mut tunn = t.lock().await;
+        match tunn.update_timers(&mut buffer) {
+            TunnResult::Done => expired = false,
+            TunnResult::WriteToNetwork(packet) => {
+                expired = false;
+                if let Err(e) = socket.send_to(packet, &endpoint).await {
+                    eprintln!("WireGuard UDP send to {endpoint} failed: {e}");
+                }
+            }
+            // Returned on every tick until new traffic starts a fresh handshake; log it once.
+            TunnResult::Err(WireGuardError::ConnectionExpired) => {
+                if !expired {
+                    eprintln!("WireGuard handshake expired, waiting for traffic to retry");
+                }
+                expired = true;
+            }
+            TunnResult::Err(e) => eprintln!("WireGuard timer error: {e:?}"),
+            TunnResult::WriteToTunnelV4(..) | TunnResult::WriteToTunnelV6(..) => {}
         }
     }
 }

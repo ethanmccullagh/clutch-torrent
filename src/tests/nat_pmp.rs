@@ -23,7 +23,6 @@ async fn request(local_port: u16, opcode: u8) -> Bytes {
         .unwrap();
 
     let (reply, from) = recv_packet(&mut read).await;
-    control.send(ProxyMessage::Close).await.unwrap();
 
     assert_eq!(from, IpAddress::v4(10, 2, 0, 1), "reply not from gateway");
     assert_eq!(reply[0], 0, "NAT-PMP version");
