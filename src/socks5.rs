@@ -47,17 +47,13 @@ pub async fn run_server(
     proxy_tx: mpsc::Sender<ProxyMessage>,
     inbound_port: Option<u16>,
 ) -> Result<()> {
-    serve(
-        TcpListener::bind(crate::SOCKS_ADDR).await?,
-        proxy_tx,
-        inbound_port,
-    )
-    .await
+    let listener = TcpListener::bind(("127.0.0.1", crate::DEFAULT_SOCKS_PORT)).await?;
+    serve(Arc::new(listener), proxy_tx, inbound_port).await
 }
 
 /// `run_server` on an already bound listener, so callers can report a bind failure up front.
 pub async fn serve(
-    listener: TcpListener,
+    listener: Arc<TcpListener>,
     proxy_tx: mpsc::Sender<ProxyMessage>,
     inbound_port: Option<u16>,
 ) -> Result<()> {

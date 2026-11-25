@@ -206,9 +206,14 @@ progress::-moz-progress-bar {
 .status.completed {
   color: var(--success);
 }
-.status.waiting,
+.status.pending,
+.status.checking,
 .status.paused {
   color: var(--on-surface-muted);
+}
+.status.error {
+  color: var(--error);
+  cursor: help; /* the message is in the tooltip */
 }
 .empty {
   padding: 3rem 1rem;
@@ -246,6 +251,21 @@ progress::-moz-progress-bar {
 }
 .dot.on {
   background: var(--success);
+}
+
+/* ---- Snackbar ---- */
+.snackbar {
+  position: fixed;
+  left: 50%;
+  bottom: 3rem;
+  transform: translateX(-50%);
+  max-width: min(36rem, 90vw);
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius);
+  background: var(--on-surface);
+  color: var(--surface);
+  box-shadow: 0 3px 8px rgb(0 0 0 / 0.3);
+  cursor: pointer;
 }
 
 /* ---- Dialogs and forms ---- */
@@ -310,6 +330,11 @@ input:focus {
 .or {
   margin: 0.75rem 0 0;
   text-align: center;
+  color: var(--on-surface-muted);
+}
+.hint {
+  margin: 0.4rem 0 0;
+  font-size: 0.85rem;
   color: var(--on-surface-muted);
 }
 .error {

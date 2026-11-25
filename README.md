@@ -11,7 +11,7 @@ app ──SOCKS5──> socks5.rs ──ProxyMessage──> event_driven_engine 
 - **`setup.rs`** reads a standard WireGuard `.conf` file and builds the boringtun tunnel and smoltcp interface.
 - **`boringthreads.rs`** runs async tasks that encrypt and decrypt packets and exchange them with the peer over UDP.
 - **`event_driven_engine/`** is a tokio task that owns the smoltcp stack. It sleeps until a tunnel packet, a `ProxyMessage` (see `schema.rs`), a reader wake-up, or a smoltcp timer arrives, then moves data until nothing more can move. It manages TCP, UDP and ICMP sockets, queues TCP writes until the socket can send, holds received data while a reader's channel is full, and handles NAT-PMP port-mapping requests. A `None` on a socket's read channel means EOF; dropping the read channel closes the socket.
-- **`socks5.rs`** is a SOCKS5 server on `127.0.0.1:1080` (CONNECT and UDP ASSOCIATE, IPv4 only, no auth) that turns client connections into engine sockets. Hostnames are resolved through the tunnel, so DNS doesn't leak.
+- **`socks5.rs`** is a SOCKS5 server on `127.0.0.1:1080` by default (`--socks-port` changes it) (CONNECT and UDP ASSOCIATE, IPv4 only, no auth) that turns client connections into engine sockets. Hostnames are resolved through the tunnel, so DNS doesn't leak.
 
 ## Usage
 
@@ -29,7 +29,7 @@ cargo run -- path/to/wireguard.conf --forward 6881
 
 ## Desktop app: Clutch
 
-Clutch is a Tauri app in `src-tauri/` with a plain HTML/JS frontend in `ui/` (no npm build step): the base of a torrent client. It has a single torrent list, a settings dialog with a light/dark theme, an add-torrent dialog (magnet link or .torrent file), and a connection dialog that starts and stops the bridge with optional port forwarding; the status bar shows the VPN state, proxy address and announced port. There is no torrent engine yet: added torrents are only listed, as "Waiting for engine".
+Clutch is a Tauri app in `src-tauri/` with a plain HTML/JS frontend in `ui/` (no npm build step): the base of a torrent client. It has a single torrent list, a settings dialog with a light/dark theme, an add-torrent dialog (magnet link or .torrent file), and a connection dialog that starts and stops the bridge with optional port forwarding; the status bar shows the VPN state, proxy address and announced port. There is no torrent engine yet, so the torrent list and add dialog don't do anything. Clutch keeps its proxy port (Settings, default 1080) reserved for as long as it runs, so no other program can take it, and refuses connections on it while the VPN is disconnected instead of letting them go direct.
 
 ```sh
 cargo tauri dev      # run it (needs tauri-cli: cargo install tauri-cli)

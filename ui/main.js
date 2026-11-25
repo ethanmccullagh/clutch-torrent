@@ -4,22 +4,24 @@ const { invoke } = window.__TAURI__.core;
 const $ = (id) => document.getElementById(id);
 
 // ---- Torrent list ----
-// No torrent engine yet: added torrents only appear here, waiting. Each entry:
-// { id, name, size (bytes or null), progress (0..1), status, down, up (bytes/s), peers }
-// status: "waiting" | "downloading" | "seeding" | "completed" | "paused"
-const torrents = [];
-let nextId = 1;
+// `torrents` comes from the engine (list_torrents, refreshed every second). Each entry:
+// { id, name, size (bytes), progress (0..1), status, error, down, up (bytes/s), peers }
+// `pending` holds torrents still being added (magnet links wait for metadata from peers).
+let torrents = [];
+const pending = [];
+let nextPendingId = 1;
 
 const STATUS_LABELS = {
-  waiting: "Waiting for engine",
+  pending: "Fetching metadata…",
+  checking: "Checking",
   downloading: "Downloading",
   seeding: "Seeding",
-  completed: "Completed",
   paused: "Paused",
+  error: "Error",
 };
 
 function formatBytes(bytes) {
-  if (bytes == null) return "–";
+  if (!bytes) return bytes === 0 ? "0 B" : "–";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let i = 0;
   while (bytes >= 1024 && i < units.length - 1) {
@@ -39,42 +41,69 @@ function cell(text, className) {
 function renderTorrents() {
   const rows = $("torrent-rows");
   rows.replaceChildren();
-  for (const t of torrents) {
+  for (const t of [...torrents, ...pending]) {
     const tr = document.createElement("tr");
-    tr.append(cell(t.name, "name"), cell(formatBytes(t.size), "num"));
+    tr.append(cell(t.name, "name"), cell(t.size ? formatBytes(t.size) : "–", "num"));
 
     const progressCell = document.createElement("td");
     const bar = document.createElement("progress");
     bar.max = 1;
     bar.value = t.progress;
     bar.setAttribute("aria-label", `${t.name} progress`);
-    progressCell.append(bar, ` ${Math.round(t.progress * 100)}%`);
+    progressCell.append(bar, ` ${Math.floor(t.progress * 100)}%`);
     tr.append(progressCell);
 
+    const status = cell(STATUS_LABELS[t.status] ?? t.status, `status ${t.status}`);
+    if (t.error) status.title = t.error;
     tr.append(
-      cell(STATUS_LABELS[t.status], `status ${t.status}`),
+      status,
       cell(`${formatBytes(t.down)}/s`, "num"),
       cell(`${formatBytes(t.up)}/s`, "num"),
       cell(String(t.peers), "num"),
     );
 
     const actions = document.createElement("td");
-    const remove = document.createElement("button");
-    remove.className = "button text";
-    remove.textContent = "Remove";
-    remove.setAttribute("aria-label", `Remove ${t.name}`);
-    remove.addEventListener("click", () => {
-      torrents.splice(torrents.indexOf(t), 1);
-      renderTorrents();
-    });
-    actions.append(remove);
+    if (t.status !== "pending") {
+      const remove = document.createElement("button");
+      remove.className = "button text";
+      remove.textContent = "Remove";
+      remove.setAttribute("aria-label", `Remove ${t.name} (downloaded files are kept)`);
+      remove.addEventListener("click", async () => {
+        try {
+          await invoke("remove_torrent", { id: t.id });
+        } catch (error) {
+          notify(`Couldn't remove ${t.name}: ${error}`);
+        }
+        refreshTorrents();
+      });
+      actions.append(remove);
+    }
     tr.append(actions);
     rows.append(tr);
   }
-  $("empty").hidden = torrents.length > 0;
+  $("empty").hidden = torrents.length + pending.length > 0;
   $("total-down").textContent = `${formatBytes(torrents.reduce((sum, t) => sum + t.down, 0))}/s`;
   $("total-up").textContent = `${formatBytes(torrents.reduce((sum, t) => sum + t.up, 0))}/s`;
 }
+
+async function refreshTorrents() {
+  try {
+    torrents = await invoke("list_torrents");
+  } catch (error) {
+    console.error("list_torrents failed", error);
+  }
+  renderTorrents();
+}
+
+// ---- Snackbar: messages that outlive a dialog, e.g. an add that failed later ----
+let snackbarTimer;
+function notify(message) {
+  $("snackbar").textContent = message;
+  $("snackbar").hidden = false;
+  clearTimeout(snackbarTimer);
+  snackbarTimer = setTimeout(() => ($("snackbar").hidden = true), 10000);
+}
+$("snackbar").addEventListener("click", () => ($("snackbar").hidden = true));
 
 // ---- Dialogs ----
 for (const button of document.querySelectorAll("[data-close]")) {
@@ -88,18 +117,42 @@ $("open-add").addEventListener("click", () => {
 $("open-connection").addEventListener("click", () => $("connection-dialog").showModal());
 
 // ---- Settings ----
-$("open-settings").addEventListener("click", () => {
+let savedProxyPort;
+$("open-settings").addEventListener("click", async () => {
   document.querySelector(`input[name="theme"][value="${currentTheme()}"]`).checked = true;
+  $("settings-error").textContent = "";
+  const settings = await invoke("get_settings");
+  savedProxyPort = settings.proxyPort;
+  $("proxy-port").value = settings.proxyPort;
+  $("proxy-port-active").textContent = settings.activeProxyPort
+    ? `In use now: ${settings.activeProxyPort}.`
+    : "No port is in use now, so the torrent engine is off.";
   $("settings-dialog").showModal();
+});
+// "Done": the theme is already applied; save the proxy port if it changed.
+$("settings-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const port = Number($("proxy-port").value);
+  if (port !== savedProxyPort) {
+    try {
+      await invoke("set_proxy_port", { port });
+      notify(`Proxy port ${port} saved. Restart Clutch to use it.`);
+    } catch (error) {
+      $("settings-error").textContent = String(error);
+      return;
+    }
+  }
+  $("settings-dialog").close();
 });
 for (const radio of document.querySelectorAll('input[name="theme"]')) {
   radio.addEventListener("change", () => setTheme(radio.value)); // applies right away
 }
 
-$("add-form").addEventListener("submit", (event) => {
+$("add-form").addEventListener("submit", async (event) => {
   const magnet = $("magnet").value.trim();
   const file = $("torrent-file").files[0];
   let name;
+  let args;
   if (magnet) {
     if (!magnet.startsWith("magnet:?")) {
       event.preventDefault();
@@ -109,23 +162,34 @@ $("add-form").addEventListener("submit", (event) => {
     // The display name (dn) is optional; fall back to the info hash.
     const params = new URLSearchParams(magnet.slice("magnet:?".length));
     name = params.get("dn") || params.get("xt")?.split(":").pop() || "Unnamed torrent";
+    args = { magnet };
   } else if (file) {
     name = file.name.replace(/\.torrent$/i, "");
+    args = { torrentFile: Array.from(new Uint8Array(await file.arrayBuffer())) };
   } else {
     event.preventDefault();
     $("add-error").textContent = "Enter a magnet link or choose a .torrent file.";
     return;
   }
-  // TODO: hand the magnet/file to the torrent engine once it exists.
-  torrents.push({ id: nextId++, name, size: null, progress: 0, status: "waiting", down: 0, up: 0, peers: 0 });
+
+  // The dialog closes now; the torrent shows as pending until the engine has it.
+  const entry = { id: `pending-${nextPendingId++}`, name, size: 0, progress: 0, status: "pending", down: 0, up: 0, peers: 0 };
+  pending.push(entry);
   renderTorrents();
+  try {
+    await invoke("add_torrent", args);
+  } catch (error) {
+    notify(`Couldn't add ${name}: ${error}`);
+  }
+  pending.splice(pending.indexOf(entry), 1);
+  refreshTorrents();
 });
 
 // ---- Connection (the VPN bridge) ----
 function showStatus(status) {
   $("vpn-state").textContent = status.running ? "Connected" : "Disconnected";
   $("vpn-dot").classList.toggle("on", status.running);
-  $("socks-addr").textContent = status.running ? status.socksAddr : "–";
+  $("socks-addr").textContent = status.socksAddr ?? "unavailable";
   const samePort = status.publicTcpPort === status.publicUdpPort;
   $("public-port").textContent = !status.publicIp
     ? "–"
@@ -159,5 +223,11 @@ $("connection-form").addEventListener("submit", (event) => {
 });
 $("stop").addEventListener("click", () => callBridge("stop_bridge"));
 
-renderTorrents();
-callBridge("bridge_status");
+refreshTorrents();
+setInterval(refreshTorrents, 1000);
+invoke("bridge_status").then((status) => {
+  showStatus(status);
+  if (status.proxyError) {
+    notify(`The torrent engine is off: ${status.proxyError}. Choose another proxy port in Settings, then restart Clutch.`);
+  }
+});

@@ -1,6 +1,10 @@
 //! The bridge as a library, used by the CLI (`main.rs`) and the Tauri app (`src-tauri/`).
 //! `Bridge::start` runs the tunnel, engine, SOCKS5 server and optional port forwarding;
 //! dropping the `Bridge` stops them all.
+//!
+//! The caller binds the SOCKS5 listener (`bind_socks`) and keeps it. While the bridge is stopped,
+//! `refuse_connections` holds the port, so no other program can take it and receive traffic
+//! meant for the VPN (the kill switch relies on that).
 
 pub mod boringthreads;
 pub mod event_driven_engine;
@@ -16,11 +20,31 @@ use anyhow::{Context, Result};
 use ini::Ini;
 use port_forward::Mapping;
 use schema::ProxyMessage;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinSet};
 
-pub const SOCKS_ADDR: &str = "127.0.0.1:1080";
+pub const DEFAULT_SOCKS_PORT: u16 = 1080;
+
+/// Bind the SOCKS5 listener on localhost. Port 0 picks a free port.
+pub async fn bind_socks(port: u16) -> Result<Arc<TcpListener>> {
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .await
+        .with_context(|| format!("proxy port {port} on 127.0.0.1 is unavailable"))?;
+    Ok(Arc::new(listener))
+}
+
+/// Hold the SOCKS5 port while the bridge is stopped: accept and close every connection, so
+/// clients fail at once instead of hanging, and no other program can bind the port. Runs until
+/// aborted; abort it before starting a bridge on the same listener.
+pub async fn refuse_connections(listener: Arc<TcpListener>) {
+    loop {
+        if let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    }
+}
 
 pub struct Bridge {
     /// Engine and SOCKS5 server; each yields its name when it stops.
@@ -32,14 +56,16 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    /// Start everything; errors a user can fix (bad config path, SOCKS port taken, port
-    /// forwarding refused) are returned. A malformed config file still panics in `setup.rs`.
-    pub async fn start(config_path: &str, forward_port: Option<u16>) -> Result<Bridge> {
+    /// Start everything, serving SOCKS5 on `socks` (from `bind_socks`). Errors a user can fix
+    /// (bad config path, port forwarding refused) are returned. A malformed config file still
+    /// panics in `setup.rs`.
+    pub async fn start(
+        config_path: &str,
+        forward_port: Option<u16>,
+        socks: Arc<TcpListener>,
+    ) -> Result<Bridge> {
         let conf = Ini::load_from_file(config_path)
             .with_context(|| format!("failed to load WireGuard config {config_path}"))?;
-        let listener = TcpListener::bind(SOCKS_ADDR)
-            .await
-            .with_context(|| format!("SOCKS5 address {SOCKS_ADDR} unavailable"))?;
 
         let (vpn_sender, vpn_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
         let (device_sender, device_receiver) = mpsc::channel::<Vec<u8>>(100);
@@ -72,7 +98,7 @@ impl Bridge {
             bridge.mapping = Some(mapping);
         }
         bridge.tasks.spawn(async move {
-            if let Err(e) = socks5::serve(listener, control_sender, forward_port).await {
+            if let Err(e) = socks5::serve(socks, control_sender, forward_port).await {
                 eprintln!("SOCKS5 server failed: {e}");
             }
             "SOCKS5 server"
@@ -80,8 +106,9 @@ impl Bridge {
         Ok(bridge)
     }
 
-    /// Stop everything and wait until the engine and SOCKS5 server are gone, so the SOCKS5
-    /// port is free again when this returns. (Just dropping the Bridge stops it in the background.)
+    /// Stop everything and wait until the engine and SOCKS5 server are gone, so nothing else is
+    /// accepting on the SOCKS5 listener when this returns. (Dropping the Bridge stops it in the
+    /// background.)
     pub async fn stop(mut self) {
         for task in &self.tunnel_tasks {
             task.abort();
@@ -106,5 +133,37 @@ impl Drop for Bridge {
         for task in &self.tunnel_tasks {
             task.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod socks_port_tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    /// While refusing, the port stays taken and connections are closed at once.
+    #[tokio::test]
+    async fn refused_port_is_held_and_closes_connections() {
+        let listener = bind_socks(0).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let refuser = tokio::spawn(refuse_connections(listener.clone()));
+
+        assert!(
+            bind_socks(port).await.is_err(),
+            "another listener could take the port"
+        );
+
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut buf = [0u8; 1];
+        let read = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("connection hung instead of being closed");
+        assert!(
+            matches!(read, Ok(0) | Err(_)),
+            "connection was served: {read:?}"
+        );
+        refuser.abort();
     }
 }

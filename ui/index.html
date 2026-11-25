@@ -37,7 +37,10 @@
         </thead>
         <tbody id="torrent-rows"></tbody>
       </table>
-      <p id="empty" class="empty">No torrents yet. Add a magnet link or a .torrent file.</p>
+      <p id="empty" class="empty">
+        No torrents yet. Add a magnet link or a .torrent file.<br />
+        Only torrents with HTTP(S) trackers can be used: UDP trackers and DHT would bypass the VPN.
+      </p>
     </main>
 
     <footer class="status-bar" aria-live="polite">
@@ -48,6 +51,8 @@
       <span>↓ <span id="total-down">0 B/s</span></span>
       <span>↑ <span id="total-up">0 B/s</span></span>
     </footer>
+
+    <div id="snackbar" class="snackbar" role="status" hidden></div>
 
     <dialog id="add-dialog" aria-labelledby="add-title">
       <form id="add-form" method="dialog">
@@ -66,15 +71,23 @@
     </dialog>
 
     <dialog id="settings-dialog" aria-labelledby="settings-title">
-      <form method="dialog">
+      <form id="settings-form">
         <h2 id="settings-title">Settings</h2>
         <fieldset>
           <legend>Theme</legend>
           <label class="choice"><input type="radio" name="theme" value="light" /> Light</label>
           <label class="choice"><input type="radio" name="theme" value="dark" /> Dark</label>
         </fieldset>
+        <label for="proxy-port">Proxy port</label>
+        <input id="proxy-port" type="number" min="1024" max="65535" required aria-describedby="proxy-port-hint" />
+        <p id="proxy-port-hint" class="hint">
+          Connects the torrent engine to the VPN on 127.0.0.1. Clutch keeps this port reserved while
+          it runs, so no other program can take it. A change takes effect after restarting Clutch.
+          <span id="proxy-port-active"></span>
+        </p>
+        <p id="settings-error" class="error" role="alert"></p>
         <div class="dialog-actions">
-          <button type="submit" class="button text">Close</button>
+          <button type="submit" class="button text">Done</button>
         </div>
       </form>
     </dialog>

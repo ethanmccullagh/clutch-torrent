@@ -41,7 +41,7 @@ cat > "$entry" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Clutch
-Comment=Torrent client that routes through a WireGuard VPN
+Comment=SOCKS5 proxy through a WireGuard VPN
 Exec="$binary"
 Icon=clutch
 Terminal=false
