@@ -1,0 +1,153 @@
+//! Tests that run against a real WireGuard tunnel. They need the config (`$WG_CONFIG_PATH`,
+//! default `cachy3-CA-1208.conf` in the repo root) and network access.
+//!
+//! - `tunnel`:  raw packets through boringtun, no engine
+//! - `icmp`, `tcp`, `udp`, `nat_pmp`: engine sockets driven by `ProxyMessage`s
+//! - `socks5`:  the SOCKS5 server on 127.0.0.1:1080
+//! - `port_forward`: real inbound TCP and UDP from this machine's own network to the VPN's public address
+
+mod icmp;
+mod nat_pmp;
+mod port_forward;
+mod socks5;
+mod tcp;
+mod tunnel;
+mod udp;
+
+use crate::boringthreads::spawn_boring_threads;
+use crate::event_driven_engine::run_engine;
+use crate::schema::{ConnectMessage, ProxyMessage, SocketReadChannel};
+use crate::setup::setup_tunnel;
+use crate::socks5::run_server;
+use ini::Ini;
+use smoltcp::iface::SocketHandle;
+use std::sync::LazyLock;
+use std::time::Duration;
+use tokio::runtime::Runtime;
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, MutexGuard, OnceCell};
+
+// Tests share one tunnel and engine (the server keeps one session per key, so a second
+// handshake would break the first). The lock keeps tests sequential: they reuse ports such as 5000.
+static TUNNEL_LOCK: Mutex<()> = Mutex::const_new(());
+
+/// Hold the returned guard for the whole test.
+async fn lock_tunnel() -> MutexGuard<'static, ()> {
+    TUNNEL_LOCK.lock().await
+}
+
+fn load_config() -> Ini {
+    let path =
+        std::env::var("WG_CONFIG_PATH").unwrap_or_else(|_| "cachy3-CA-1208.conf".to_string());
+    Ini::load_from_file(path).expect("Failed to load WG config for testing")
+}
+
+/// The shared SOCKS5 server's port-forwarded port: its first UDP association binds it. The
+/// port-forwarding test also forwards incoming TCP to 127.0.0.1 on this port.
+const INBOUND_PORT: u16 = 46881;
+
+/// The shared tunnel, engine and SOCKS5 server.
+struct TestEnv {
+    control: mpsc::Sender<ProxyMessage>,
+    /// Raw IP packets into boringtun, bypassing the engine.
+    vpn: mpsc::UnboundedSender<Vec<u8>>,
+    /// Copy of every decrypted packet from the tunnel, taken before the engine sees it.
+    tap: broadcast::Sender<Vec<u8>>,
+}
+
+// Each #[tokio::test] has its own runtime that dies with the test; the shared tasks need one that lives on.
+static RUNTIME: LazyLock<Runtime> =
+    LazyLock::new(|| Runtime::new().expect("failed to build the shared test runtime"));
+static ENV: OnceCell<TestEnv> = OnceCell::const_new();
+
+/// Start the shared environment on first use; later calls return the same one.
+async fn test_env() -> &'static TestEnv {
+    ENV.get_or_init(|| async {
+        RUNTIME
+            .spawn(start_env())
+            .await
+            .expect("test environment setup panicked")
+    })
+    .await
+}
+
+async fn start_env() -> TestEnv {
+    let conf = load_config();
+
+    let (vpn_sender, vpn_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tunnel_sender, mut tunnel_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (device_sender, device_receiver) = mpsc::channel::<Vec<u8>>(100);
+    let (control_sender, control_receiver) = mpsc::channel::<ProxyMessage>(100);
+
+    let (tunn, endpoint) = setup_tunnel(conf.clone());
+    spawn_boring_threads(tunn, endpoint, vpn_receiver, tunnel_sender)
+        .await
+        .expect("Failed to spawn boring threads");
+
+    let (tap, _) = broadcast::channel(100);
+    let tap_sender = tap.clone();
+    tokio::spawn(async move {
+        while let Some(packet) = tunnel_receiver.recv().await {
+            let _ = tap_sender.send(packet.clone()); // Err just means no test is listening
+            if device_sender.send(packet).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    tokio::spawn(run_engine(
+        conf,
+        device_receiver,
+        vpn_sender.clone(),
+        control_receiver,
+    ));
+
+    let server_control = control_sender.clone();
+    tokio::spawn(async move {
+        let _ = run_server(server_control, Some(INBOUND_PORT)).await;
+    });
+
+    // Give the WireGuard handshake a moment
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    TestEnv {
+        control: control_sender,
+        vpn: vpn_sender,
+        tap,
+    }
+}
+
+/// The shared engine's control channel. Don't send `ProxyMessage::Close`: it stops the engine for every later test.
+async fn start_test_environment() -> mpsc::Sender<ProxyMessage> {
+    test_env().await.control.clone()
+}
+
+/// Send a Connect message; return the socket handle and its read channel.
+async fn connect(
+    control: &mpsc::Sender<ProxyMessage>,
+    make: impl FnOnce(
+        oneshot::Sender<Option<SocketHandle>>,
+        mpsc::Sender<SocketReadChannel>,
+    ) -> ConnectMessage,
+) -> (SocketHandle, mpsc::Receiver<SocketReadChannel>) {
+    let (resp, handle) = oneshot::channel();
+    let (read_tx, read) = mpsc::channel::<SocketReadChannel>(10);
+    control
+        .send(ProxyMessage::Connect {
+            msg: make(resp, read_tx),
+        })
+        .await
+        .unwrap();
+    (handle.await.unwrap().expect("socket creation failed"), read)
+}
+
+/// Wait up to 5 s for one received packet; panic on timeout, EOF or closed channel.
+async fn recv_packet(
+    read: &mut mpsc::Receiver<SocketReadChannel>,
+) -> (bytes::Bytes, smoltcp::wire::IpEndpoint) {
+    match tokio::time::timeout(Duration::from_secs(5), read.recv()).await {
+        Ok(Some(Some(packet))) => packet,
+        Ok(Some(None)) => panic!("got EOF instead of data"),
+        Ok(None) => panic!("read channel closed"),
+        Err(_) => panic!("timed out waiting for data"),
+    }
+}
