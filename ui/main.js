@@ -225,6 +225,11 @@ $("stop").addEventListener("click", () => callBridge("stop_bridge"));
 
 refreshTorrents();
 setInterval(refreshTorrents, 1000);
+// Fill the Connection dialog with the values from the last successful connect.
+invoke("get_settings").then((settings) => {
+  $("config-path").value = settings.configPath;
+  $("forward-port").value = settings.forwardPort ?? "";
+});
 invoke("bridge_status").then((status) => {
   showStatus(status);
   if (status.proxyError) {
