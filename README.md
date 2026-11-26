@@ -1,4 +1,4 @@
-# socks5-vpn-bridge
+# Clutch Torrent
 
 A userspace WireGuard client that exposes the tunnel as a local SOCKS5 proxy. No root, no TUN device, no kernel module: traffic is encrypted with [boringtun](https://github.com/cloudflare/boringtun) and routed through a [smoltcp](https://github.com/smoltcp-rs/smoltcp) TCP/IP stack running entirely in-process.
 
